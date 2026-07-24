@@ -1,0 +1,4 @@
+{
+  "name": "p5-playground",
+  "install": "npx --yes skills experimental_install"
+}
