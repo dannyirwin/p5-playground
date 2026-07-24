@@ -1,4 +1,21 @@
 {
   "name": "p5-playground",
-  "install": "npx --yes skills experimental_install"
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "install": "npm install && npx --yes skills experimental_install",
+  "terminals": [
+    {
+      "name": "vite",
+      "command": "npm run dev",
+      "description": "Vite + p5.js playground on port 5173"
+    }
+  ],
+  "ports": [
+    {
+      "name": "vite",
+      "port": 5173
+    }
+  ]
 }

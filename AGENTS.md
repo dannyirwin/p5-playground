@@ -37,16 +37,27 @@ Start with the engineering and tooling sections; treat empty sections as unsettl
 
 ## Project
 
-p5.js creative-coding playground.
-Stack and commands will grow as the project takes shape.
+Vite + p5.js creative-coding playground (ESM, Vite 8, p5 1.x).
+
+| Task | Command |
+| --- | --- |
+| Install | `npm install` |
+| Dev server | `npm run dev` (http://localhost:5173) |
+| Production build | `npm run build` |
+| Preview build | `npm run preview` |
+
+Sketch entrypoint: `src/main.js`. Keep sketches module-friendly; prefer importing `p5` over CDN globals.
+
+**Definition of done for sketch/tooling changes:** `npm run build` succeeds.
 
 ## Cursor Cloud
 
 - Agent bundle lives in committed `.cursor/` (implement-plan, code-review, subagents, plan-sync hook).
 - Shared opinions: committed `.agents/OPINIONS.md` - do **not** rely on a `~/.agents` symlink in cloud VMs.
-- Restore external skills after clone: `npx skills experimental_install` (reads `skills-lock.json`).
-- Cloud install script is `.cursor/environment.json` (`install` restores skills from the lockfile).
-- Re-apply or refresh the bundle from [dannyirwin/dotfiles](https://github.com/dannyirwin/dotfiles):
+- Environment is Dockerfile-based (`.cursor/Dockerfile` + `.cursor/environment.json`).
+- `install` runs `npm install` and restores skills from `skills-lock.json`.
+- Vite starts via the `terminals` entry on port 5173.
+- Re-apply or refresh the agent bundle from [dannyirwin/dotfiles](https://github.com/dannyirwin/dotfiles):
 
 ```bash
 bash ~/dotfiles/scripts/apply-project.sh /workspace
