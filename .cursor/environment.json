@@ -4,18 +4,18 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  "install": "npx --yes skills experimental_install",
+  "install": "npm install && npx --yes skills experimental_install",
   "terminals": [
     {
-      "name": "static",
-      "command": "python3 -m http.server 8000",
-      "description": "Static p5.js playground on port 8000"
+      "name": "dev",
+      "command": "npm run dev",
+      "description": "SvelteKit Vite dev server on port 5173"
     }
   ],
   "ports": [
     {
-      "name": "static",
-      "port": 8000
+      "name": "dev",
+      "port": 5173
     }
   ]
 }
