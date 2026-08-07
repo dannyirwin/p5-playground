@@ -18,12 +18,19 @@
 				if (cancelled || !mountEl) return;
 
 				const { default: P5 } = await import('p5');
+				if (cancelled || !mountEl) return;
+
 				instance = new P5(
 					createHandInstrument({
 						getShowVideo: () => showVideo
 					}),
 					mountEl
 				);
+
+				if (cancelled) {
+					instance.remove();
+					instance = undefined;
+				}
 			} catch (err) {
 				loadError = err instanceof Error ? err.message : 'Failed to start sketch';
 				console.error(err);
