@@ -4,18 +4,18 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  "install": "npm install && npx --yes skills experimental_install",
+  "install": "npx --yes skills experimental_install",
   "terminals": [
     {
-      "name": "vite",
-      "command": "npm run dev",
-      "description": "Vite + p5.js playground on port 5173"
+      "name": "static",
+      "command": "python3 -m http.server 8000",
+      "description": "Static p5.js playground on port 8000"
     }
   ],
   "ports": [
     {
-      "name": "vite",
-      "port": 5173
+      "name": "static",
+      "port": 8000
     }
   ]
 }
