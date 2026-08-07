@@ -46,7 +46,7 @@ export function loadBrowserSketchDeps(): Promise<void> {
 	if (!depsPromise) {
 		depsPromise = (async () => {
 			const { default: P5 } = await import('p5');
-			(window as Window & { p5: typeof P5 }).p5 = P5;
+			(window as unknown as { p5: typeof P5 }).p5 = P5;
 
 			await loadScript(
 				'https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/addons/p5.sound.min.js'

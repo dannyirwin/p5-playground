@@ -39,6 +39,11 @@ interface P5SoundConstructors {
 	Oscillator: new (type: string) => SoundOscillator;
 }
 
+/** Instance methods added by the p5.sound addon at runtime. */
+type P5WithSound = p5 & {
+	userStartAudio: () => Promise<void>;
+};
+
 interface StringState {
 	midi: number;
 	amplitude: number;
@@ -130,7 +135,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			p.createCanvas(640, 480);
 
 			try {
-				video = p.createCapture(p.VIDEO);
+				video = p.createCapture('video');
 				video.size(640, 480);
 				video.hide();
 				handPose?.detectStart(video, (results) => {
@@ -151,7 +156,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		};
 
 		p.mousePressed = () => {
-			void p.userStartAudio();
+			void (p as P5WithSound).userStartAudio();
 		};
 
 		p.draw = () => {
