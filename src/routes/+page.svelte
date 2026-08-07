@@ -1,2 +1,7 @@
-<h1>p5-playground</h1>
-<p>SvelteKit scaffold - hand instrument mounts in a following commit.</p>
+<script lang="ts">
+	import HandInstrument from '$lib/components/HandInstrument.svelte';
+</script>
+
+<main>
+	<HandInstrument />
+</main>
