@@ -1,0 +1,21 @@
+{
+  "name": "p5-playground",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "install": "npx --yes skills experimental_install",
+  "terminals": [
+    {
+      "name": "static",
+      "command": "python3 -m http.server 8000",
+      "description": "Static p5.js playground on port 8000"
+    }
+  ],
+  "ports": [
+    {
+      "name": "static",
+      "port": 8000
+    }
+  ]
+}

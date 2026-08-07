@@ -1,0 +1,32 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Installed by `npx skills experimental_install` from skills-lock.json
+.agents/skills/
+.agents/.skill-lock.json
+.cursor/skills/*
+!.cursor/skills/implement-plan/
+!.cursor/skills/code-review/
+.claude/skills/
