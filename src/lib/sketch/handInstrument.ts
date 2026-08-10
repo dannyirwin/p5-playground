@@ -244,9 +244,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 					? resolveDegreeTriad(rawChordId, mode, degreeTilt)
 					: 'major';
 			const modQuality = modHand ? getModifierQuality(modHand) : null;
-			// Modifier overrides degree tilt when it is not the neutral "natural" triad.
-			const rawQuality: QualityName =
-				modQuality && modQuality !== 'natural' ? modQuality : triadQuality;
+			// Active modifier pose overrides degree+tilt triad; neutral/absent keeps it.
+			const rawQuality: QualityName = modQuality ?? triadQuality;
 			const harmonyKey = `${rawChordId}|${rawQuality}`;
 
 			if (harmonyKey === harmonyLastRaw) harmonyStable++;
@@ -724,52 +723,52 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			return 0;
 		}
 
-		function getModifierQuality(modHand: Hand): QualityName {
+		/**
+		 * Modifier-hand quality poses. Returns null when absent/unclear so the
+		 * degree hand triad (with tilt) remains in effect.
+		 */
+		function getModifierQuality(modHand: Hand): Exclude<QualityName, 'natural'> | null {
 			const kp = modHand.keypoints;
 			const wrist = kp[0];
+			const scale = p.dist(wrist.x, wrist.y, kp[9].x, kp[9].y);
+			if (scale < 1) return null;
+
 			const d = (a: HandKeypoint, b: HandKeypoint) =>
 				p.dist(a.x, a.y, b.x, b.y);
 			const up = (tip: number, pip: number) =>
-				d(wrist, kp[tip]) > d(wrist, kp[pip]) * 1.1;
+				d(wrist, kp[tip]) > d(wrist, kp[pip]) * 1.08;
 
 			const indexUp = up(8, 6);
 			const middleUp = up(12, 10);
 			const ringUp = up(16, 14);
 			const pinkyUp = up(20, 18);
-			const thumbExtended = d(kp[4], kp[17]) > d(kp[2], kp[17]) * 1.3;
+			const thumbOut = d(kp[4], kp[17]) > d(kp[2], kp[17]) * 1.2;
+			const upCount = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
 
-			if (!thumbExtended && !indexUp && ringUp && pinkyUp) {
-				return middleUp ? 'sus4' : 'sus2';
+			if (thumbOut) {
+				// Thumb + index + pinky
+				if (indexUp && pinkyUp && !middleUp && !ringUp) return 'diminished7';
+				// Thumb + pinky
+				if (pinkyUp && !indexUp && !middleUp && !ringUp) return 'halfDiminished7';
+				// Thumb + index + middle
+				if (indexUp && middleUp && !ringUp && !pinkyUp) return 'minor7';
+				// Thumb + index
+				if (indexUp && !middleUp && !ringUp && !pinkyUp) return 'major7';
+				// Thumb out, fist
+				if (upCount === 0) return 'dominant7';
+				return null;
 			}
 
-			let tilt: 'neutral' | 'up' | 'down' = 'neutral';
-			if (indexUp) {
-				const indexMcp = kp[5];
-				const indexTip = kp[8];
-				const dx = indexTip.x - indexMcp.x;
-				const dy = indexTip.y - indexMcp.y;
-				const angle = (Math.atan2(dy, Math.abs(dx)) * 180) / Math.PI;
-				const THRESH = 40;
-				if (angle <= -THRESH) tilt = 'up';
-				else if (angle >= THRESH) tilt = 'down';
-			}
+			// Index + pinky (middle/ring down)
+			if (indexUp && pinkyUp && !middleUp && !ringUp) return 'augmented';
+			// Middle + ring (index/pinky down)
+			if (middleUp && ringUp && !indexUp && !pinkyUp) return 'diminished';
+			// Index + middle
+			if (indexUp && middleUp && !ringUp && !pinkyUp) return 'sus4';
+			// Index only
+			if (indexUp && !middleUp && !ringUp && !pinkyUp) return 'sus2';
 
-			let topCount = 0;
-			if (indexUp) topCount = middleUp ? 2 : 1;
-
-			if (thumbExtended) {
-				if (topCount === 0) return 'dominant7';
-				if (topCount === 1) {
-					if (tilt === 'up') return 'augmented7';
-					if (tilt === 'down') return 'halfDiminished7';
-					return 'major7';
-				}
-				return tilt === 'down' ? 'diminished7' : 'minor7';
-			}
-
-			if (topCount === 0) return 'natural';
-			if (topCount === 1) return tilt === 'up' ? 'augmented' : 'major';
-			return tilt === 'down' ? 'diminished' : 'minor';
+			return null;
 		}
 	};
 }
