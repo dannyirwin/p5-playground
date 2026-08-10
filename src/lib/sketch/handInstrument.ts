@@ -1,10 +1,12 @@
 import type p5 from 'p5';
 import {
+	diatonicTriadQuality,
 	formatKeyLabel,
 	rootMidiFromPc,
 	scaleDegreeMidi,
 	type PitchClass,
-	type ScaleMode
+	type ScaleMode,
+	type TriadQuality
 } from './harmony.ts';
 
 export interface HandKeypoint {
@@ -236,7 +238,15 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				: chordLastRaw;
 			if (chordHand) chordLastRaw = rawChordId;
 
-			const rawQuality = modHand ? getModifierQuality(modHand) : 'major';
+			const degreeTilt = chordHand ? getDegreeTilt(chordHand) : 'neutral';
+			const triadQuality =
+				rawChordId > 0
+					? resolveDegreeTriad(rawChordId, mode, degreeTilt)
+					: 'major';
+			const modQuality = modHand ? getModifierQuality(modHand) : null;
+			// Modifier overrides degree tilt when it is not the neutral "natural" triad.
+			const rawQuality: QualityName =
+				modQuality && modQuality !== 'natural' ? modQuality : triadQuality;
 			const harmonyKey = `${rawChordId}|${rawQuality}`;
 
 			if (harmonyKey === harmonyLastRaw) harmonyStable++;
@@ -606,6 +616,47 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			targetMidi: number
 		): number[] {
 			return targetPitchClasses.map((pc) => nearestNote(pc, targetMidi));
+		}
+
+		/**
+		 * Inward vs outward lean of the degree hand (camera-facing, fingers up).
+		 * Uses handedness so "inward" means toward the body midline.
+		 */
+		function getDegreeTilt(hand: Hand): 'inward' | 'outward' | 'neutral' {
+			const kp = hand.keypoints;
+			const wrist = kp[0];
+			const middleMcp = kp[9];
+			const middleTip = kp[12];
+			const scale = p.dist(wrist.x, wrist.y, middleMcp.x, middleMcp.y);
+			if (scale < 1) return 'neutral';
+
+			const leanX = middleTip.x - middleMcp.x;
+			// Person's Right hand: inward leans toward -x in the camera frame.
+			const inwardDir = hand.handedness === 'Right' ? -1 : 1;
+			const inwardScore = leanX * inwardDir;
+			const thresh = scale * 0.22;
+			if (inwardScore > thresh) return 'inward';
+			if (inwardScore < -thresh) return 'outward';
+			return 'neutral';
+		}
+
+		/**
+		 * Natural diatonic triad for degree in current mode; outward flips
+		 * maj↔min. Diminished natural is unchanged by outward tilt.
+		 */
+		function resolveDegreeTriad(
+			degree: number,
+			scaleMode: ScaleMode,
+			tilt: 'inward' | 'outward' | 'neutral'
+		): TriadQuality {
+			const natural = diatonicTriadQuality(degree, scaleMode) ?? 'major';
+			if (
+				tilt === 'outward' &&
+				(natural === 'major' || natural === 'minor')
+			) {
+				return natural === 'major' ? 'minor' : 'major';
+			}
+			return natural;
 		}
 
 		/**
