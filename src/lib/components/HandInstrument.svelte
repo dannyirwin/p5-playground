@@ -3,10 +3,17 @@
 	import type p5 from 'p5';
 	import { createHandInstrument } from '$lib/sketch/handInstrument';
 	import { loadBrowserSketchDeps } from '$lib/sketch/loadDeps';
+	import {
+		PITCH_CLASS_NAMES,
+		type PitchClass,
+		type ScaleMode
+	} from '$lib/sketch/harmony';
 
 	let mountEl: HTMLDivElement | undefined = $state();
 	let showVideo = $state(false);
 	let loadError = $state('');
+	let rootPc = $state<PitchClass>(0);
+	let mode = $state<ScaleMode>('major');
 
 	onMount(() => {
 		let instance: p5 | undefined;
@@ -22,7 +29,9 @@
 
 				instance = new P5(
 					createHandInstrument({
-						getShowVideo: () => showVideo
+						getShowVideo: () => showVideo,
+						getRootPc: () => rootPc,
+						getMode: () => mode
 					}),
 					mountEl
 				);
@@ -42,9 +51,42 @@
 			instance?.remove();
 		};
 	});
+
+	function onRootChange(event: Event): void {
+		const value = Number((event.currentTarget as HTMLSelectElement).value);
+		if (value >= 0 && value <= 11) {
+			rootPc = value as PitchClass;
+		}
+	}
+
+	function onModeChange(event: Event): void {
+		const value = (event.currentTarget as HTMLSelectElement).value;
+		if (value === 'major' || value === 'minor') {
+			mode = value;
+		}
+	}
 </script>
 
 <div class="instrument">
+	<div class="controls">
+		<label>
+			Key
+			<select value={rootPc} onchange={onRootChange}>
+				{#each PITCH_CLASS_NAMES as name, pc}
+					<option value={pc}>{name}</option>
+				{/each}
+			</select>
+		</label>
+
+		<label>
+			Mode
+			<select value={mode} onchange={onModeChange}>
+				<option value="major">major</option>
+				<option value="minor">minor</option>
+			</select>
+		</label>
+	</div>
+
 	<div class="canvas-host" bind:this={mountEl}></div>
 
 	{#if loadError}
@@ -53,7 +95,7 @@
 
 	<p class="hint">
 		Click canvas to enable audio. Chord hand: ASL digits 1-8. Modifier hand:
-		fingers/tilt/thumb set chord quality.
+		fingers/tilt/thumb set chord quality. Use Key/Mode to set the diatonic tonic.
 	</p>
 
 	<button type="button" onclick={() => (showVideo = !showVideo)}>
@@ -69,6 +111,27 @@
 		min-height: 100vh;
 		box-sizing: border-box;
 		font-family: system-ui, sans-serif;
+	}
+
+	.controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 16px;
+		margin-bottom: 10px;
+		max-width: 640px;
+	}
+
+	.controls label {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.controls select {
+		background: #15191c;
+		color: #e8ecef;
+		border: 1px solid #2a3238;
+		padding: 4px 8px;
 	}
 
 	.canvas-host :global(canvas) {

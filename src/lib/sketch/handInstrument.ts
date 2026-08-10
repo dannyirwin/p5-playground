@@ -1,4 +1,11 @@
 import type p5 from 'p5';
+import {
+	formatKeyLabel,
+	rootMidiFromPc,
+	scaleDegreeMidi,
+	type PitchClass,
+	type ScaleMode
+} from './harmony.ts';
 
 export interface HandKeypoint {
 	x: number;
@@ -70,6 +77,8 @@ type QualityName =
 
 export interface HandInstrumentOptions {
 	getShowVideo: () => boolean;
+	getRootPc: () => PitchClass;
+	getMode: () => ScaleMode;
 }
 
 declare global {
@@ -77,9 +86,6 @@ declare global {
 		ml5: Ml5Api;
 	}
 }
-
-const majorScale = [0, 2, 4, 5, 7, 9, 11];
-const rootMidi = 60; // C4
 
 const qualityIntervals: Record<Exclude<QualityName, 'natural'>, number[]> = {
 	major: [0, 4, 7],
@@ -102,7 +108,6 @@ const FOLLOWER_MAX_SPEED = 60;
 const SUSTAIN_LEVEL = 0.35;
 /** Vertical falloff (px) for proximity glow around the follower dot. */
 const PROXIMITY_FALLOFF = 52;
-const ROOT_PC = ((rootMidi % 12) + 12) % 12;
 /** Seconds to fade oscillators to silence on release / chord change. */
 const RELEASE_TIME = 0.55;
 const RELEASE_STOP_MS = 650;
@@ -135,6 +140,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		let currentChordId: number | null = null;
 		let currentQuality: QualityName = 'major';
 		let previousNotes: number[] | null = null;
+		let lastRootPc: PitchClass = options.getRootPc();
+		let lastMode: ScaleMode = options.getMode();
 
 		/** Joint degree+quality raw key; both hands share one settle clock. */
 		let harmonyLastRaw = '0|major';
@@ -212,6 +219,18 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			}
 			updateFollower(lastHandTargetX, lastHandTargetY);
 
+			const rootPc = options.getRootPc();
+			const mode = options.getMode();
+			if (rootPc !== lastRootPc || mode !== lastMode) {
+				lastRootPc = rootPc;
+				lastMode = mode;
+				if (currentChordId && currentChordId > 0) {
+					startVoicing(currentChordId, currentQuality, {
+						onlyIfChanged: false
+					});
+				}
+			}
+
 			const rawChordId = chordHand
 				? classifyASLNumber(chordHand)
 				: chordLastRaw;
@@ -226,7 +245,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				harmonyLastRaw = harmonyKey;
 			}
 
-			// One commit when degree + quality have both held steady — moving
+			// One commit when degree + quality have both held steady - moving
 			// both hands together yields a single voicing update, not two.
 			if (harmonyStable === SETTLE_FRAMES) {
 				const chordChanged = rawChordId !== currentChordId;
@@ -286,12 +305,13 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			p.fill(255);
 			p.noStroke();
 			p.textSize(16);
-			p.text('Chord: ' + (currentChordId ? currentChordId : '-'), 10, 24);
-			p.text('Quality: ' + currentQuality, 10, 44);
+			p.text('Key: ' + formatKeyLabel(rootPc, mode), 10, 24);
+			p.text('Chord: ' + (currentChordId ? currentChordId : '-'), 10, 44);
+			p.text('Quality: ' + currentQuality, 10, 64);
 			p.text(
 				'Notes: ' + (previousNotes ? previousNotes.join(',') : '-'),
 				10,
-				64
+				84
 			);
 		};
 
@@ -442,7 +462,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			p.noFill();
 			for (const s of strings) {
 				const elapsed = p.millis() - s.lastPluck;
-				const isRoot = ((s.midi % 12) + 12) % 12 === ROOT_PC;
+				const rootPcNow = options.getRootPc();
+				const isRoot = ((s.midi % 12) + 12) % 12 === rootPcNow;
 				const proximity = p.exp(-p.abs(s.y - followerY) / PROXIMITY_FALLOFF);
 				const amp = p.constrain(s.amplitude, 0, 1);
 
@@ -537,11 +558,12 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			voices = [];
 		}
 
-		function scaleDegreeMidi(idx: number): number {
-			const oct = Math.floor(idx / majorScale.length);
-			const deg =
-				((idx % majorScale.length) + majorScale.length) % majorScale.length;
-			return rootMidi + oct * 12 + majorScale[deg];
+		function degreeMidi(degreeIndex: number): number {
+			return scaleDegreeMidi(
+				rootMidiFromPc(options.getRootPc()),
+				options.getMode(),
+				degreeIndex
+			);
 		}
 
 		function chordPitchClassesForQuality(
@@ -552,13 +574,13 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 
 			if (qualityName === 'natural') {
 				return [0, 2, 4].map(
-					(off) => ((scaleDegreeMidi(rootIdx + off) % 12) + 12) % 12
+					(off) => ((degreeMidi(rootIdx + off) % 12) + 12) % 12
 				);
 			}
 
-			const rootPc = ((scaleDegreeMidi(rootIdx) % 12) + 12) % 12;
+			const chordRootPc = ((degreeMidi(rootIdx) % 12) + 12) % 12;
 			const intervals = qualityIntervals[qualityName];
-			return intervals.map((iv) => (rootPc + iv) % 12);
+			return intervals.map((iv) => (chordRootPc + iv) % 12);
 		}
 
 		function targetMidiFromHandY(y: number): number {
