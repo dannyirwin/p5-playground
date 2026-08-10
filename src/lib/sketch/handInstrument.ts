@@ -654,7 +654,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 
 		/**
 		 * Natural diatonic triad for degree in current mode; outward flips
-		 * maj↔min. Diminished natural is unchanged by outward tilt.
+		 * maj/min. Diminished natural is unchanged by outward tilt.
 		 */
 		function resolveDegreeTriad(
 			degree: number,
@@ -672,7 +672,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		}
 
 		/**
-		 * Camera-facing degree poses (fingers generally up). Returns 1–7, or 0
+		 * Camera-facing degree poses (fingers generally up). Returns 1-7, or 0
 		 * for fist / unrecognized (release). No degree 8.
 		 */
 		function classifyDegree(hand: Hand): number {

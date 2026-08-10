@@ -24,7 +24,7 @@ export const PITCH_CLASS_NAMES = [
 export const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11] as const;
 export const NATURAL_MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10] as const;
 
-/** Degree 1–7 → natural triad quality in major. */
+/** Degree 1-7: natural triad quality in major. */
 export const MAJOR_DIATONIC_TRIADS: readonly TriadQuality[] = [
 	'major',
 	'minor',
@@ -35,7 +35,7 @@ export const MAJOR_DIATONIC_TRIADS: readonly TriadQuality[] = [
 	'diminished'
 ];
 
-/** Degree 1–7 → natural triad quality in natural minor. */
+/** Degree 1-7: natural triad quality in natural minor. */
 export const MINOR_DIATONIC_TRIADS: readonly TriadQuality[] = [
 	'minor',
 	'diminished',
