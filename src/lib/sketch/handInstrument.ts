@@ -149,6 +149,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		let harmonyLastRaw = '0|major';
 		let harmonyStable = 0;
 		let chordLastRaw = 0;
+		let degreeTiltLast: 'inward' | 'outward' | 'neutral' = 'neutral';
 
 		let voicingCommitY = 0;
 		let voicingArmed = false;
@@ -238,7 +239,10 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				: chordLastRaw;
 			if (chordHand) chordLastRaw = rawChordId;
 
-			const degreeTilt = chordHand ? getDegreeTilt(chordHand) : 'neutral';
+			const degreeTilt = chordHand
+				? getDegreeTilt(chordHand)
+				: degreeTiltLast;
+			if (chordHand) degreeTiltLast = degreeTilt;
 			const triadQuality =
 				rawChordId > 0
 					? resolveDegreeTriad(rawChordId, mode, degreeTilt)
