@@ -315,8 +315,21 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			p.noStroke();
 			p.textSize(16);
 			p.text('Key: ' + formatKeyLabel(rootPc, mode), 10, 24);
-			p.text('Chord: ' + (currentChordId ? currentChordId : '-'), 10, 44);
-			p.text('Quality: ' + currentQuality, 10, 64);
+			p.text(
+				'Degree: ' +
+					(currentChordId ? currentChordId : '-') +
+					'  tilt: ' +
+					degreeTilt,
+				10,
+				44
+			);
+			p.text(
+				'Quality: ' +
+					currentQuality +
+					(modQuality ? ' (mod)' : ' (triad)'),
+				10,
+				64
+			);
 			p.text(
 				'Notes: ' + (previousNotes ? previousNotes.join(',') : '-'),
 				10,

@@ -39,9 +39,13 @@ Start with the engineering and tooling sections; treat empty sections as unsettl
 
 A [p5.js](https://p5js.org/) creative-coding sketch: a webcam hand-tracking musical
 instrument.
-Two hands are read via [ml5.js](https://ml5js.org/) `handPose` - one hand
-selects a chord (ASL digits 1-8), the other sets chord quality (finger/tilt/thumb pose) -
-and the notes are synthesized with `p5.sound` oscillators and drawn as vibrating "strings".
+Two hands are read via [ml5.js](https://ml5js.org/) `handPose`.
+One hand selects a scale degree (poses 1-7) and can tilt inward/outward to keep or
+flip the diatonic triad quality; the other hand can override quality with explicit
+modifier poses (sus, aug/dim, sevenths).
+Key (C-B) and mode (major/minor) are chosen in the UI so natural triads follow that
+scale.
+Notes are synthesized with `p5.sound` oscillators and drawn as vibrating "strings".
 
 This is a **TypeScript [SvelteKit](https://svelte.dev/docs/kit) SPA** (`@sveltejs/adapter-static`,
 `ssr = false`).
@@ -59,6 +63,41 @@ Core `p5` comes from npm; `p5.sound` and `ml5` load from CDN inside the browser 
 
 Definition of done for sketch/app changes: `npm run check` and `npm run build` both pass.
 There is no separate test suite or linter beyond `svelte-check`.
+
+### Gesture cheat sheet
+
+**Degree hand** (camera-facing, fingers up):
+
+| Pose | Degree |
+| --- | --- |
+| Index up | 1 |
+| Index + middle | 2 |
+| Thumb-pinky touch; index/middle/ring up | 3 |
+| Four fingers, thumb in | 4 |
+| Open five | 5 |
+| Thumb + index + pinky | 6 |
+| Thumb out, other fingers down | 7 |
+| Fist / unrecognized | release (0) |
+
+Inward (or neutral) tilt: natural diatonic triad in the selected key and mode.
+Outward tilt: maj/min flip when the natural quality is major or minor; diminished is unchanged.
+
+**Modifier hand** (overrides degree tilt when a pose is clear):
+
+| Pose | Quality |
+| --- | --- |
+| No clear pose / hand absent | Degree + tilt triad |
+| Index up | sus2 |
+| Index + middle | sus4 |
+| Index + pinky | augmented |
+| Middle + ring | diminished |
+| Thumb out, fist | dominant7 |
+| Thumb + index | major7 |
+| Thumb + index + middle | minor7 |
+| Thumb + pinky | half-diminished7 |
+| Thumb + index + pinky | diminished7 |
+
+UI **Key** and **Mode** controls set the tonic pitch class and major/natural-minor scale.
 
 ## Cursor Cloud
 

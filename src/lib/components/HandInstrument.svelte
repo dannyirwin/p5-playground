@@ -94,8 +94,19 @@
 	{/if}
 
 	<p class="hint">
-		Click canvas to enable audio. Chord hand: ASL digits 1-8. Modifier hand:
-		fingers/tilt/thumb set chord quality. Use Key/Mode to set the diatonic tonic.
+		Click the canvas to enable audio. Choose Key (C-B) and Mode (major/minor)
+		above; natural triads follow that scale.
+	</p>
+	<p class="hint">
+		Degree hand (1-7): 1 index; 2 index+middle; 3 thumb-pinky touch with
+		index/middle/ring up; 4 four fingers thumb in; 5 open hand; 6
+		thumb+index+pinky; 7 thumb out fist. Fist / unclear releases. Inward tilt
+		keeps the diatonic triad; outward flips maj/min (diminished stays).
+	</p>
+	<p class="hint">
+		Modifier hand (overrides tilt when clear): index sus2; index+middle sus4;
+		index+pinky aug; middle+ring dim; thumb fist dom7; thumb+index maj7;
+		thumb+index+middle min7; thumb+pinky half-dim7; thumb+index+pinky dim7.
 	</p>
 
 	<button type="button" onclick={() => (showVideo = !showVideo)}>
