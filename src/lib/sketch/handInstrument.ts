@@ -100,6 +100,23 @@ const FOLLOWER_ACCEL = 0.05;
 const FOLLOWER_DAMPING = 0.8;
 const FOLLOWER_MAX_SPEED = 60;
 const SUSTAIN_LEVEL = 0.35;
+/** Vertical falloff (px) for proximity glow around the follower dot. */
+const PROXIMITY_FALLOFF = 52;
+const ROOT_PC = ((rootMidi % 12) + 12) % 12;
+/** Seconds to fade oscillators to silence on release / chord change. */
+const RELEASE_TIME = 0.55;
+const RELEASE_STOP_MS = 650;
+/** Chord / quality gesture settle (frames). */
+const SETTLE_FRAMES = 5;
+/** Longer hold so vertical voicing only shifts after the hand parks. */
+const VOICING_SETTLE_FRAMES = 36;
+/** Max follower Y drift (px) still counted as "parked". */
+const VOICING_SETTLE_Y = 12;
+/**
+ * After a voicing commits, ignore Y motion until the hand leaves this
+ * deadzone (px) - stops small drifts from flipping inversions.
+ */
+const VOICING_COMMIT_DEADZONE = 48;
 
 function soundCtors(P5: typeof p5): P5SoundConstructors {
 	return P5 as unknown as P5SoundConstructors;
@@ -116,9 +133,18 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		let strings: StringState[] = [];
 
 		let currentChordId: number | null = null;
-		let chordStable = 0;
-		let chordLastRaw = 0;
+		let currentQuality: QualityName = 'major';
 		let previousNotes: number[] | null = null;
+
+		/** Joint degree+quality raw key; both hands share one settle clock. */
+		let harmonyLastRaw = '0|major';
+		let harmonyStable = 0;
+		let chordLastRaw = 0;
+
+		let voicingCommitY = 0;
+		let voicingArmed = false;
+		let voicingAnchorY = 0;
+		let voicingStable = 0;
 
 		let followerX = 0;
 		let followerY = 0;
@@ -178,9 +204,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				}
 			}
 
-			const chordHand =
-				hands.find((h) => h.handedness === 'Left') || hands[0] || null;
-			const modHand = hands.find((h) => h !== chordHand) || null;
+			const { chordHand, modHand } = assignChordAndModHands(hands);
 
 			if (chordHand) {
 				lastHandTargetX = chordHand.keypoints[9].x;
@@ -188,29 +212,67 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			}
 			updateFollower(lastHandTargetX, lastHandTargetY);
 
-			const quality = modHand ? getModifierQuality(modHand) : 'major';
+			const rawChordId = chordHand
+				? classifyASLNumber(chordHand)
+				: chordLastRaw;
+			if (chordHand) chordLastRaw = rawChordId;
 
-			if (chordHand) {
-				const chordId = classifyASLNumber(chordHand);
-				if (chordId === chordLastRaw) chordStable++;
-				else {
-					chordStable = 0;
-					chordLastRaw = chordId;
-				}
+			const rawQuality = modHand ? getModifierQuality(modHand) : 'major';
+			const harmonyKey = `${rawChordId}|${rawQuality}`;
 
-				if (chordStable === 5 && chordId !== currentChordId) {
-					if (chordId === 0) {
+			if (harmonyKey === harmonyLastRaw) harmonyStable++;
+			else {
+				harmonyStable = 0;
+				harmonyLastRaw = harmonyKey;
+			}
+
+			// One commit when degree + quality have both held steady — moving
+			// both hands together yields a single voicing update, not two.
+			if (harmonyStable === SETTLE_FRAMES) {
+				const chordChanged = rawChordId !== currentChordId;
+				const qualityChanged = rawQuality !== currentQuality;
+				if (chordChanged || qualityChanged) {
+					if (rawChordId === 0) {
 						stopChord();
 						previousNotes = null;
+						voicingCommitY = followerY;
+						voicingArmed = false;
+						voicingAnchorY = followerY;
+						voicingStable = 0;
 						for (const s of strings) s.active = false;
 					} else {
-						const targetPCs = chordPitchClassesForQuality(chordId, quality);
-						const targetMidi = targetMidiFromHandY(followerY);
-						const voicing = closestVoicingToDot(targetPCs, targetMidi);
-						playVoicing(voicing, 0.5, followerX);
-						previousNotes = voicing;
+						startVoicing(rawChordId, rawQuality, {
+							onlyIfChanged: !chordChanged
+						});
 					}
-					currentChordId = chordId;
+					currentChordId = rawChordId;
+					currentQuality = rawQuality;
+				}
+			}
+
+			// Vertical register: must leave a deadzone around the last commit,
+			// then park again before the voicing can change.
+			if (currentChordId && currentChordId > 0) {
+				if (!voicingArmed) {
+					if (p.abs(followerY - voicingCommitY) >= VOICING_COMMIT_DEADZONE) {
+						voicingArmed = true;
+						voicingAnchorY = followerY;
+						voicingStable = 0;
+					}
+				} else if (p.abs(followerY - voicingAnchorY) <= VOICING_SETTLE_Y) {
+					voicingStable++;
+					if (voicingStable >= VOICING_SETTLE_FRAMES) {
+						const desired = desiredVoicing(currentChordId, currentQuality);
+						if (!sameNoteSet(previousNotes, desired)) {
+							playVoicing(desired, 0.5, followerX);
+							previousNotes = desired;
+							voicingCommitY = followerY;
+							voicingArmed = false;
+						}
+					}
+				} else {
+					voicingAnchorY = followerY;
+					voicingStable = 0;
 				}
 			}
 
@@ -225,13 +287,91 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			p.noStroke();
 			p.textSize(16);
 			p.text('Chord: ' + (currentChordId ? currentChordId : '-'), 10, 24);
-			p.text('Quality: ' + quality, 10, 44);
+			p.text('Quality: ' + currentQuality, 10, 44);
 			p.text(
 				'Notes: ' + (previousNotes ? previousNotes.join(',') : '-'),
 				10,
 				64
 			);
 		};
+
+		function handPalmDist(hand: Hand, x: number, y: number): number {
+			const kp = hand.keypoints[9];
+			return p.dist(kp.x, kp.y, x, y);
+		}
+
+		/**
+		 * Chord hand owns the follower dot. With two hands, stick to whichever
+		 * is nearest the last chord target so handedness flicker / array order
+		 * never yanks the dot onto the modifier hand.
+		 */
+		function assignChordAndModHands(detected: Hand[]): {
+			chordHand: Hand | null;
+			modHand: Hand | null;
+		} {
+			if (detected.length === 0) return { chordHand: null, modHand: null };
+			if (detected.length === 1) {
+				return { chordHand: detected[0], modHand: null };
+			}
+
+			const left = detected.find((h) => h.handedness === 'Left');
+			const nearest = detected.reduce((best, h) =>
+				handPalmDist(h, lastHandTargetX, lastHandTargetY) <
+				handPalmDist(best, lastHandTargetX, lastHandTargetY)
+					? h
+					: best
+			);
+
+			// Prefer Left only when nothing is near the tracked target yet
+			// (fresh two-hand appearance); otherwise stay sticky.
+			const nearTrack = detected.some(
+				(h) => handPalmDist(h, lastHandTargetX, lastHandTargetY) < 160
+			);
+			const chordHand = nearTrack ? nearest : left ?? nearest;
+			const modHand = detected.find((h) => h !== chordHand) ?? null;
+			return { chordHand, modHand };
+		}
+
+		function noteSetKey(notes: number[]): string {
+			return [...notes].sort((a, b) => a - b).join(',');
+		}
+
+		function sameNoteSet(a: number[] | null, b: number[]): boolean {
+			return a !== null && noteSetKey(a) === noteSetKey(b);
+		}
+
+		function pitchClassKey(notes: number[]): string {
+			return [...new Set(notes.map((n) => ((n % 12) + 12) % 12))]
+				.sort((a, b) => a - b)
+				.join(',');
+		}
+
+		function samePitchClasses(a: number[] | null, b: number[]): boolean {
+			return a !== null && pitchClassKey(a) === pitchClassKey(b);
+		}
+
+		function desiredVoicing(chordId: number, quality: QualityName): number[] {
+			const targetPCs = chordPitchClassesForQuality(chordId, quality);
+			const targetMidi = targetMidiFromHandY(followerY);
+			return closestVoicingToDot(targetPCs, targetMidi);
+		}
+
+		function startVoicing(
+			chordId: number,
+			quality: QualityName,
+			opts: { onlyIfChanged?: boolean } = {}
+		): void {
+			const voicing = desiredVoicing(chordId, quality);
+			if (opts.onlyIfChanged && samePitchClasses(previousNotes, voicing)) {
+				return;
+			}
+			playVoicing(voicing, 0.5, followerX);
+			previousNotes = voicing;
+			voicingCommitY = followerY;
+			voicingArmed = false;
+			voicingAnchorY = followerY;
+			voicingStable = 0;
+		}
 
 		function midiNumberToHz(m: number): number {
 			return 440 * p.pow(2, (m - 69) / 12);
@@ -287,7 +427,10 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			for (const s of strings) {
 				const floor = s.active ? SUSTAIN_LEVEL : 0;
 				if (Math.abs(s.amplitude - floor) > 0.001) {
-					const tau = p.map(s.midi, 36, 96, 900, 300);
+					// Held notes settle quickly; released notes ring out longer.
+					const tau = s.active
+						? p.map(s.midi, 36, 96, 900, 300)
+						: p.map(s.midi, 36, 96, 1600, 850);
 					s.amplitude = floor + (s.amplitude - floor) * p.exp(-p.deltaTime / tau);
 				} else {
 					s.amplitude = floor;
@@ -299,9 +442,41 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			p.noFill();
 			for (const s of strings) {
 				const elapsed = p.millis() - s.lastPluck;
-				const alpha = p.lerp(50, 255, p.constrain(s.amplitude, 0, 1));
-				const weight = p.lerp(1, 2, p.constrain(s.amplitude, 0, 1));
-				p.stroke(94, 230, 168, alpha);
+				const isRoot = ((s.midi % 12) + 12) % 12 === ROOT_PC;
+				const proximity = p.exp(-p.abs(s.y - followerY) / PROXIMITY_FALLOFF);
+				const amp = p.constrain(s.amplitude, 0, 1);
+
+				// Idle glow tracks the follower so nearby (playable) notes read clearly;
+				// roots stay brighter overall for key context. Pluck amplitude can still
+				// push a string to full intensity.
+				const idleAlpha = p.lerp(
+					isRoot ? 72 : 18,
+					isRoot ? 230 : 175,
+					proximity
+				);
+				const alpha = Math.max(idleAlpha, p.lerp(0, 255, amp));
+				const weight = p.lerp(
+					isRoot ? 1.25 : 0.85,
+					2.15,
+					Math.max(proximity * 0.55, amp)
+				);
+
+				if (isRoot) {
+					// Brighter, slightly warmer teal so scale roots stand out.
+					p.stroke(
+						p.lerp(150, 220, proximity),
+						p.lerp(235, 255, proximity),
+						p.lerp(200, 235, proximity),
+						alpha
+					);
+				} else {
+					p.stroke(
+						p.lerp(70, 110, proximity),
+						p.lerp(160, 230, proximity),
+						p.lerp(130, 180, proximity),
+						alpha
+					);
+				}
 				p.strokeWeight(weight);
 
 				const originX = s.originX;
@@ -333,7 +508,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 						s.amplitude = 1;
 						s.lastPluck = p.millis();
 					}
-					s.originX = handX;
+					s.originX = p.width - handX;
 					s.active = true;
 				} else {
 					s.active = false;
@@ -356,8 +531,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 
 		function stopChord(): void {
 			for (const osc of voices) {
-				osc.amp(0, 0.08);
-				setTimeout(() => osc.stop(), 150);
+				osc.amp(0, RELEASE_TIME);
+				setTimeout(() => osc.stop(), RELEASE_STOP_MS);
 			}
 			voices = [];
 		}
