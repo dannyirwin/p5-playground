@@ -232,7 +232,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			}
 
 			const rawChordId = chordHand
-				? classifyASLNumber(chordHand)
+				? classifyDegree(chordHand)
 				: chordLastRaw;
 			if (chordHand) chordLastRaw = rawChordId;
 
@@ -608,31 +608,68 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			return targetPitchClasses.map((pc) => nearestNote(pc, targetMidi));
 		}
 
-		function classifyASLNumber(hand: Hand): number {
+		/**
+		 * Camera-facing degree poses (fingers generally up). Returns 1–7, or 0
+		 * for fist / unrecognized (release). No degree 8.
+		 */
+		function classifyDegree(hand: Hand): number {
 			const kp = hand.keypoints;
 			const wrist = kp[0];
 			const scale = p.dist(wrist.x, wrist.y, kp[9].x, kp[9].y);
+			if (scale < 1) return 0;
+
 			const d = (a: HandKeypoint, b: HandKeypoint) =>
 				p.dist(a.x, a.y, b.x, b.y);
+			// Tip farther from wrist than PIP → finger extended "up".
 			const up = (tip: number, pip: number) =>
-				d(wrist, kp[tip]) > d(wrist, kp[pip]) * 1.1;
-			const touching = (tipIdx: number) => d(kp[4], kp[tipIdx]) < scale * 0.5;
+				d(wrist, kp[tip]) > d(wrist, kp[pip]) * 1.08;
+			const thumbPinkyTouch = d(kp[4], kp[20]) < scale * 0.48;
 
 			const indexUp = up(8, 6);
 			const middleUp = up(12, 10);
 			const ringUp = up(16, 14);
 			const pinkyUp = up(20, 18);
-			const thumbOut = d(kp[4], kp[17]) > d(kp[2], kp[17]) * 1.05;
-			const upCount = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
+			const thumbOut = d(kp[4], kp[17]) > d(kp[2], kp[17]) * 1.08;
+			const fingerUps = [indexUp, middleUp, ringUp, pinkyUp];
+			const upCount = fingerUps.filter(Boolean).length;
 
+			// 7: thumb out, other fingers curled
+			if (thumbOut && upCount === 0) return 7;
+
+			// 1: index only
 			if (upCount === 1 && indexUp) return 1;
-			if (upCount === 2 && indexUp && middleUp) return thumbOut ? 3 : 2;
-			if (upCount === 4) return thumbOut ? 5 : 4;
-			if (upCount === 3) {
-				if (!pinkyUp && touching(20)) return 6;
-				if (!ringUp && touching(16)) return 7;
-				if (!middleUp && touching(12)) return 8;
+
+			// 2: index + middle
+			if (upCount === 2 && indexUp && middleUp) return 2;
+
+			// 6: thumb + index + pinky (middle/ring down)
+			if (
+				thumbOut &&
+				indexUp &&
+				pinkyUp &&
+				!middleUp &&
+				!ringUp &&
+				upCount === 2
+			) {
+				return 6;
 			}
+
+			// 3: index/middle/ring up with thumb-pinky touch (former ASL 6)
+			if (
+				indexUp &&
+				middleUp &&
+				ringUp &&
+				!pinkyUp &&
+				thumbPinkyTouch &&
+				upCount === 3
+			) {
+				return 3;
+			}
+
+			// 4 / 5: four fingers; thumb in vs out
+			if (upCount === 4) return thumbOut ? 5 : 4;
+
+			// Former ASL-8-like (and anything else) → release
 			return 0;
 		}
 
