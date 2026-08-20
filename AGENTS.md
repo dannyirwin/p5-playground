@@ -38,38 +38,89 @@ Start with the engineering and tooling sections; treat empty sections as unsettl
 ## Project
 
 A [p5.js](https://p5js.org/) creative-coding sketch: a webcam hand-tracking musical
-instrument. Two hands are read via [ml5.js](https://ml5js.org/) `handPose` - one hand
-selects a chord (ASL digits 1-8), the other sets chord quality (finger/tilt/thumb pose) -
-and the notes are synthesized with `p5.sound` oscillators and drawn as vibrating "strings".
+instrument.
+Two hands are read via [ml5.js](https://ml5js.org/) `handPose`.
+One hand selects a scale degree (poses 1-7) and can tilt inward/outward to keep or
+flip the diatonic triad quality; the other hand can override quality with explicit
+modifier poses (sus, aug/dim, sevenths).
+Key (C-B) and mode (major/minor) are chosen in the UI so natural triads follow that
+scale.
+Notes are synthesized with `p5.sound` oscillators and drawn as vibrating "strings".
 
-This is a **static site with no build step, no package manager, no tests, and no linter**.
-The entry point is `index.html`, which loads the sketch from `sketch.js`.
+This is a **TypeScript [SvelteKit](https://svelte.dev/docs/kit) SPA** (`@sveltejs/adapter-static`,
+`ssr = false`).
+The sketch runs **client-only**: `HandInstrument.svelte` mounts a p5 instance-mode
+module (`src/lib/sketch/handInstrument.ts`) in `onMount`.
+Core `p5` comes from npm; `p5.sound` and `ml5` load from CDN inside the browser only.
 
 | Task | Command |
 | --- | --- |
-| Serve | `python3 -m http.server 8000` |
-| Open | http://localhost:8000/index.html |
+| Install | `npm install` |
+| Dev | `npm run dev` |
+| Open | http://localhost:5173 |
+| Typecheck | `npm run check` |
+| Build | `npm run build` |
 
-`index.html` loads `p5.js`, `p5.sound.min.js`, and `ml5.js` **from CDN at runtime**, so the
-browser needs outbound internet access. Local vendored copies (`p5.js`, `p5.sound.min.js`,
-`ml5.js`) are committed in the repo but are **not** referenced by `index.html`.
-There is no hot-reload; refresh the browser after edits.
+Definition of done for sketch/app changes: `npm run check` and `npm run build` both pass.
+There is no separate test suite or linter beyond `svelte-check`.
+
+### Gesture cheat sheet
+
+**Degree hand** (camera-facing, fingers up):
+
+| Pose | Degree |
+| --- | --- |
+| Index up | 1 |
+| Index + middle | 2 |
+| Thumb-pinky touch; index/middle/ring up | 3 |
+| Four fingers, thumb in | 4 |
+| Open five | 5 |
+| Index + pinky (no thumb) | 6 |
+| Thumb out, other fingers down | 7 |
+| Fist / unrecognized | release (0) |
+
+Inward (or neutral) tilt, or palm toward camera: natural diatonic triad in the selected key and mode.
+Outward tilt or palm away: maj/min flip; diminished (e.g. degree 7 in major) becomes major on the same root.
+
+**Modifier hand** (overrides degree tilt when a pose is clear):
+
+Palm toward camera (finger count from index; depends on current maj/min triad):
+
+| Fingers | If major triad | If minor / dim triad |
+| --- | --- | --- |
+| 1 (index) | major7 | minor7 |
+| 2 (index + middle) | dominant7 | half-diminished7 |
+| 2 + thumb out | dominant7 | diminished7 |
+| 3 (index + middle + ring) | sus2 | sus2 |
+| 4 (four fingers) | sus4 | sus4 |
+
+Palm away from camera:
+
+| Fingers | Quality |
+| --- | --- |
+| 1 | augmented |
+| 2 | diminished |
+
+No clear pose / hand absent: degree + tilt triad.
+
+UI **Key** and **Mode** controls set the tonic pitch class and major/natural-minor scale.
 
 ## Cursor Cloud
 
 - Agent bundle lives in committed `.cursor/` (implement-plan, code-review, subagents, plan-sync hook).
 - Shared opinions: committed `.agents/OPINIONS.md` - do **not** rely on a `~/.agents` symlink in cloud VMs.
 - Environment is Dockerfile-based (`.cursor/Dockerfile` + `.cursor/environment.json`).
-- `install` restores skills from `skills-lock.json`.
-- Static server starts via the `terminals` entry on port 8000.
-- The core feature (hand tracking) needs a **webcam**. The cloud VM has no camera, so
-  `createCapture(VIDEO)` and `ml5.handPose` cannot track hands - this is expected. The canvas,
-  the "strings" visualization, the mouse-following dot, the text overlays, and the interactive
+- `install` runs `npm install` and restores skills from `skills-lock.json`.
+- Dev server starts via the `terminals` entry: `npm run dev` on port 5173.
+- The core feature (hand tracking) needs a **webcam**.
+  The cloud VM has no camera, so `createCapture(VIDEO)` and `ml5.handPose` cannot track hands - this is expected.
+  The canvas, the "strings" visualization, the mouse-following dot, the text overlays, and the interactive
   controls (clicking the canvas enables audio; the "Show video" button toggles the webcam
   overlay) still render and work without a camera.
 - Expected console noise in the headless VM: `No webcam found` / `Requested device not found`,
-  `AudioContext was not allowed to start` (until the canvas is clicked), a `favicon.ico` 404,
-  and WebGL/WebGPU backend warnings from ml5/TensorFlow.js. None of these block rendering.
+  `AudioContext was not allowed to start` (until the canvas is clicked),
+  and WebGL/WebGPU backend warnings from ml5/TensorFlow.js.
+  None of these block rendering.
 - Re-apply or refresh the agent bundle from [dannyirwin/dotfiles](https://github.com/dannyirwin/dotfiles):
 
 ```bash
