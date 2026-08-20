@@ -75,27 +75,33 @@ There is no separate test suite or linter beyond `svelte-check`.
 | Thumb-pinky touch; index/middle/ring up | 3 |
 | Four fingers, thumb in | 4 |
 | Open five | 5 |
-| Thumb + index + pinky | 6 |
+| Index + pinky (no thumb) | 6 |
 | Thumb out, other fingers down | 7 |
 | Fist / unrecognized | release (0) |
 
-Inward (or neutral) tilt: natural diatonic triad in the selected key and mode.
-Outward tilt: maj/min flip when the natural quality is major or minor; diminished is unchanged.
+Inward (or neutral) tilt, or palm toward camera: natural diatonic triad in the selected key and mode.
+Outward tilt or palm away: maj/min flip; diminished (e.g. degree 7 in major) becomes major on the same root.
 
 **Modifier hand** (overrides degree tilt when a pose is clear):
 
-| Pose | Quality |
+Palm toward camera (finger count from index; depends on current maj/min triad):
+
+| Fingers | If major triad | If minor / dim triad |
+| --- | --- | --- |
+| 1 (index) | major7 | minor7 |
+| 2 (index + middle) | dominant7 | half-diminished7 |
+| 2 + thumb out | dominant7 | diminished7 |
+| 3 (index + middle + ring) | sus2 | sus2 |
+| 4 (four fingers) | sus4 | sus4 |
+
+Palm away from camera:
+
+| Fingers | Quality |
 | --- | --- |
-| No clear pose / hand absent | Degree + tilt triad |
-| Index up | sus2 |
-| Index + middle | sus4 |
-| Index + pinky | augmented |
-| Middle + ring | diminished |
-| Thumb out, fist | dominant7 |
-| Thumb + index | major7 |
-| Thumb + index + middle | minor7 |
-| Thumb + pinky | half-diminished7 |
-| Thumb + index + pinky | diminished7 |
+| 1 | augmented |
+| 2 | diminished |
+
+No clear pose / hand absent: degree + tilt triad.
 
 UI **Key** and **Mode** controls set the tonic pitch class and major/natural-minor scale.
 

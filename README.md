@@ -41,28 +41,28 @@ Natural triads are diatonic in that key and mode.
 | Thumb-pinky touch; index/middle/ring up | 3 |
 | Four fingers, thumb in | 4 |
 | Open five | 5 |
-| Thumb + index + pinky | 6 |
+| Index + pinky (no thumb) | 6 |
 | Thumb out, other fingers down | 7 |
 | Fist / unrecognized | release |
 
-Inward or neutral tilt keeps the natural diatonic triad.
-Outward tilt flips major and minor; diminished stays diminished.
+Inward or neutral tilt, or palm toward camera, keeps the natural diatonic triad.
+Outward tilt or palm away flips major and minor; diminished (e.g. vii in major) becomes major.
 
 ### Modifier hand
 
-When a pose is clear, it overrides degree tilt:
+When a pose is clear, it overrides degree tilt.
 
-| Pose | Quality |
-| --- | --- |
-| Index up | sus2 |
-| Index + middle | sus4 |
-| Index + pinky | augmented |
-| Middle + ring | diminished |
-| Thumb out, fist | dominant7 |
-| Thumb + index | major7 |
-| Thumb + index + middle | minor7 |
-| Thumb + pinky | half-diminished7 |
-| Thumb + index + pinky | diminished7 |
+**Palm toward camera** (depends on current maj/min triad):
+
+| Fingers | Major triad | Minor / dim triad |
+| --- | --- | --- |
+| 1 (index) | major7 | minor7 |
+| 2 (index + middle) | dominant7 | half-diminished7 |
+| 2 + thumb out | dominant7 | diminished7 |
+| 3 | sus2 | sus2 |
+| 4 | sus4 | sus4 |
+
+**Palm away from camera:** 1 finger = augmented, 2 fingers = diminished.
 
 Click the canvas to enable audio.
 Toggle **Show video** to overlay the webcam feed.
