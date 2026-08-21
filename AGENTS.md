@@ -115,9 +115,11 @@ UI **Key** and **Mode** controls set the tonic pitch class and major/natural-min
 - Dev server starts via the `terminals` entry: `npm run dev` on port 5173.
 - The core feature (hand tracking) needs a **webcam**.
   The cloud VM has no camera, so `createCapture(VIDEO)` and `ml5.handPose` cannot track hands - this is expected.
-  The canvas, the "strings" visualization, the mouse-following dot, the text overlays, and the interactive
+  The canvas, the "strings" visualization, the follower dot, the text overlays, and the interactive
   controls (clicking the canvas enables audio; the "Show video" button toggles the webcam
   overlay) still render and work without a camera.
+  The follower dot tracks the chord hand's position, so with no webcam it stays parked at
+  canvas center rather than following the mouse - this is expected, not a bug.
 - Expected console noise in the headless VM: `No webcam found` / `Requested device not found`,
   `AudioContext was not allowed to start` (until the canvas is clicked),
   and WebGL/WebGPU backend warnings from ml5/TensorFlow.js.
