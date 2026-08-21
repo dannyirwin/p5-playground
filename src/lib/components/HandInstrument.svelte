@@ -13,7 +13,10 @@
 		type ScaleMode
 	} from '$lib/sketch/harmony';
 
-	type P5WithAudio = p5 & { getAudioContext?: () => AudioContext };
+	type P5WithAudio = p5 & {
+		getAudioContext?: () => AudioContext;
+		userStartAudio?: () => Promise<void>;
+	};
 
 	let mountEl: HTMLDivElement | undefined = $state();
 	let showVideo = $state(false);
@@ -21,6 +24,7 @@
 	let audioRunning = $state(false);
 	let rootPc = $state<PitchClass>(0);
 	let mode = $state<ScaleMode>('major');
+	let unlockAudio: (() => void) | undefined = $state();
 
 	let hud = $state<InstrumentHudState>({
 		keyLabel: 'C major',
@@ -39,7 +43,7 @@
 	onMount(() => {
 		let instance: p5 | undefined;
 		let cancelled = false;
-		let audioUnlock: { destroy: () => void } | undefined;
+		let audioUnlock: ReturnType<typeof installAudioUnlock> | undefined;
 
 		void (async () => {
 			try {
@@ -68,18 +72,29 @@
 				}
 
 				const sketch = instance as P5WithAudio;
+				const getContext = (): AudioContext | undefined => {
+					try {
+						const fromInstance = sketch.getAudioContext?.();
+						if (fromInstance) return fromInstance;
+						const globalGet = (
+							window as unknown as { getAudioContext?: () => AudioContext }
+						).getAudioContext;
+						return globalGet?.();
+					} catch {
+						return undefined;
+					}
+				};
+
 				audioUnlock = installAudioUnlock(
-					() => {
-						try {
-							return sketch.getAudioContext?.();
-						} catch {
-							return undefined;
-						}
-					},
+					getContext,
 					(running) => {
 						audioRunning = running;
+					},
+					() => {
+						void sketch.userStartAudio?.();
 					}
 				);
+				unlockAudio = () => audioUnlock?.unlockFromGesture();
 			} catch (err) {
 				loadError = err instanceof Error ? err.message : 'Failed to start sketch';
 				console.error(err);
@@ -88,6 +103,7 @@
 
 		return () => {
 			cancelled = true;
+			unlockAudio = undefined;
 			audioUnlock?.destroy();
 			instance?.remove();
 		};
@@ -105,6 +121,10 @@
 		if (value === 'major' || value === 'minor') {
 			mode = value;
 		}
+	}
+
+	function onEnableSound(): void {
+		unlockAudio?.();
 	}
 </script>
 
@@ -164,13 +184,25 @@
 			<button type="button" onclick={() => (showVideo = !showVideo)}>
 				{showVideo ? 'Hide video' : 'Show video'}
 			</button>
+
+			{#if !audioRunning}
+				<button type="button" class="sound-btn" onclick={onEnableSound}>
+					Enable sound
+				</button>
+			{:else}
+				<span class="sound-ok" title="Audio is running">Sound on</span>
+			{/if}
 		</div>
 
 		{#if !audioRunning && !loadError}
-			<div class="audio-prompt" role="status" aria-live="polite">
+			<button
+				type="button"
+				class="audio-prompt"
+				onclick={onEnableSound}
+			>
 				<span class="audio-prompt-dot" aria-hidden="true"></span>
-				Tap anywhere to enable sound
-			</div>
+				Tap to enable sound
+			</button>
 		{/if}
 
 		{#if loadError}
@@ -291,6 +323,16 @@
 		font: inherit;
 	}
 
+	.sound-btn {
+		border-color: #f0a848 !important;
+		color: #f0a848 !important;
+	}
+
+	.sound-ok {
+		font-size: 13px;
+		color: #94d0a8;
+	}
+
 	.audio-prompt {
 		position: absolute;
 		bottom: 24px;
@@ -299,15 +341,17 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		padding: 9px 16px;
-		background: rgb(10 12 13 / 78%);
-		border: 1px solid rgb(255 255 255 / 12%);
+		padding: 12px 20px;
+		background: rgb(10 12 13 / 90%);
+		border: 1px solid rgb(240 168 72 / 55%);
 		border-radius: 999px;
 		backdrop-filter: blur(6px);
-		font-size: 14px;
+		font-size: 15px;
 		color: #e8ecef;
 		white-space: nowrap;
-		pointer-events: none;
+		pointer-events: auto;
+		cursor: pointer;
+		font: inherit;
 	}
 
 	.audio-prompt-dot {

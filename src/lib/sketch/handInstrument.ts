@@ -266,6 +266,12 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			void (p as P5WithSound).userStartAudio();
 		};
 
+		// iOS prefers touchEnded (committed gesture) over mousePressed/touchStarted.
+		p.touchEnded = () => {
+			void (p as P5WithSound).userStartAudio();
+			return false;
+		};
+
 		p.draw = () => {
 			p.background(10, 12, 13);
 

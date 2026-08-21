@@ -1,37 +1,31 @@
 /**
  * Robust Web Audio unlock for iOS / iPadOS Safari.
  *
- * Safari (and Chrome) start every AudioContext `suspended` until a user
- * gesture resumes it. iOS is stricter than desktop in three ways that this
- * helper works around:
+ * Safari starts every AudioContext `suspended` until a user gesture resumes it.
+ * iPad is stricter than desktop:
  *
- * 1. The gesture must be a "committed" event - `touchend`, `mouseup`, `click`,
- *    or `keydown`. Early events like `touchstart` / `pointerdown` (which p5's
- *    `mousePressed` maps to) are frequently rejected, so audio never unlocks.
- * 2. `resume()` alone is unreliable; playing a short silent buffer inside the
- *    same gesture reliably "kicks" the hardware output awake.
- * 3. After the tab is backgrounded (or a camera permission prompt appears) the
- *    context transitions to `interrupted` and must be resumed again on the next
- *    gesture / when the page becomes visible.
+ * 1. Prefer a real button `click` / `touchend` - canvas `mousePressed` (often
+ *    mapped from `touchstart` / `pointerdown`) is frequently rejected.
+ * 2. `resume()` alone is unreliable; playing a short silent buffer in the same
+ *    gesture kicks the hardware output awake.
+ * 3. After backgrounding or a camera permission sheet the context may become
+ *    `interrupted` and needs another gesture to resume.
  */
 
 type ContextGetter = () => AudioContext | undefined;
 
 export interface AudioUnlockHandle {
-	/** Detach all listeners. Safe to call more than once. */
 	destroy: () => void;
-	/** Whether the audio context is currently running. */
 	isRunning: () => boolean;
+	/**
+	 * Call from a button click / touchend handler. Creates the p5.sound
+	 * context if needed, resumes it, and kicks a silent buffer.
+	 */
+	unlockFromGesture: () => void;
 }
 
-/**
- * Committed gesture events only. iOS ignores `touchstart` / `pointerdown` /
- * `mousedown` for audio unlock on many versions, so they are deliberately
- * excluded.
- */
 const UNLOCK_EVENTS = ['touchend', 'mouseup', 'pointerup', 'click', 'keydown'] as const;
 
-/** Play a 1-sample silent buffer to force iOS to start real audio output. */
 function kickSilentBuffer(ctx: AudioContext): void {
 	try {
 		const buffer = ctx.createBuffer(1, 1, 22050);
@@ -46,7 +40,9 @@ function kickSilentBuffer(ctx: AudioContext): void {
 
 export function installAudioUnlock(
 	getContext: ContextGetter,
-	onRunningChange?: (running: boolean) => void
+	onRunningChange?: (running: boolean) => void,
+	/** Optional: create / warm the p5.sound AudioContext (e.g. userStartAudio). */
+	ensureAudio?: () => void
 ): AudioUnlockHandle {
 	const controller = new AbortController();
 	let running = false;
@@ -67,6 +63,13 @@ export function installAudioUnlock(
 	}
 
 	function attemptUnlock(): void {
+		// Must stay synchronous in the gesture chain - no await before resume.
+		try {
+			ensureAudio?.();
+		} catch {
+			/* ignore */
+		}
+
 		const ctx = getContext();
 		if (!ctx) return;
 		bindStateChange(ctx);
@@ -76,15 +79,11 @@ export function installAudioUnlock(
 			return;
 		}
 
-		// Both calls must happen synchronously inside the gesture handler; any
-		// prior `await` would break the gesture chain and iOS would stay muted.
-		// The `statechange` listener and the resume() callback flip `running`
-		// once the context actually starts.
 		kickSilentBuffer(ctx);
 		void ctx.resume().then(
 			() => setRunning(ctx.state === 'running'),
 			() => {
-				/* rejected: leave `running` false so the next gesture retries */
+				/* rejected: leave running false so the next gesture retries */
 			}
 		);
 	}
@@ -96,7 +95,6 @@ export function installAudioUnlock(
 		});
 	}
 
-	// Coming back from the background leaves the context `interrupted` on iOS.
 	document.addEventListener(
 		'visibilitychange',
 		() => {
@@ -105,11 +103,6 @@ export function installAudioUnlock(
 		{ signal: controller.signal }
 	);
 
-	// The audio context is created lazily (p5.sound builds it with the first
-	// sound node), so it may not exist yet. Poll briefly until it appears, then
-	// bind `statechange` and reflect the real state - this keeps the prompt
-	// accurate even if the context starts running without our gesture (e.g.
-	// relaxed autoplay policies).
 	const startedAt = Date.now();
 	const poll = window.setInterval(() => {
 		const ctx = getContext();
@@ -127,6 +120,7 @@ export function installAudioUnlock(
 			window.clearInterval(poll);
 			controller.abort();
 		},
-		isRunning: () => running
+		isRunning: () => running,
+		unlockFromGesture: attemptUnlock
 	};
 }
