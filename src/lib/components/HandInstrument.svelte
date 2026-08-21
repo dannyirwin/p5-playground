@@ -6,22 +6,16 @@
 		type InstrumentHudState
 	} from '$lib/sketch/handInstrument';
 	import { loadBrowserSketchDeps } from '$lib/sketch/loadDeps';
-	import { installAudioUnlock } from '$lib/sketch/audioUnlock';
 	import {
 		PITCH_CLASS_NAMES,
 		type PitchClass,
 		type ScaleMode
 	} from '$lib/sketch/harmony';
 
-	type P5WithAudio = p5 & {
-		getAudioContext?: () => AudioContext;
-		userStartAudio?: () => Promise<void>;
-	};
-
 	let mountEl: HTMLDivElement | undefined = $state();
 	let showVideo = $state(false);
 	let loadError = $state('');
-	let audioRunning = $state(false);
+	let audioReady = $state(false);
 	let rootPc = $state<PitchClass>(0);
 	let mode = $state<ScaleMode>('major');
 	let unlockAudio: (() => void) | undefined = $state();
@@ -43,7 +37,6 @@
 	onMount(() => {
 		let instance: p5 | undefined;
 		let cancelled = false;
-		let audioUnlock: ReturnType<typeof installAudioUnlock> | undefined;
 
 		void (async () => {
 			try {
@@ -60,6 +53,12 @@
 						getMode: () => mode,
 						onHudUpdate: (state) => {
 							hud = state;
+						},
+						onAudioControls: (controls) => {
+							unlockAudio = () => controls.unlock();
+						},
+						onAudioReadyChange: (ready) => {
+							audioReady = ready;
 						}
 					}),
 					mountEl
@@ -68,33 +67,7 @@
 				if (cancelled) {
 					instance.remove();
 					instance = undefined;
-					return;
 				}
-
-				const sketch = instance as P5WithAudio;
-				const getContext = (): AudioContext | undefined => {
-					try {
-						const fromInstance = sketch.getAudioContext?.();
-						if (fromInstance) return fromInstance;
-						const globalGet = (
-							window as unknown as { getAudioContext?: () => AudioContext }
-						).getAudioContext;
-						return globalGet?.();
-					} catch {
-						return undefined;
-					}
-				};
-
-				audioUnlock = installAudioUnlock(
-					getContext,
-					(running) => {
-						audioRunning = running;
-					},
-					() => {
-						void sketch.userStartAudio?.();
-					}
-				);
-				unlockAudio = () => audioUnlock?.unlockFromGesture();
 			} catch (err) {
 				loadError = err instanceof Error ? err.message : 'Failed to start sketch';
 				console.error(err);
@@ -104,7 +77,6 @@
 		return () => {
 			cancelled = true;
 			unlockAudio = undefined;
-			audioUnlock?.destroy();
 			instance?.remove();
 		};
 	});
@@ -185,21 +157,17 @@
 				{showVideo ? 'Hide video' : 'Show video'}
 			</button>
 
-			{#if !audioRunning}
+			{#if !audioReady}
 				<button type="button" class="sound-btn" onclick={onEnableSound}>
 					Enable sound
 				</button>
 			{:else}
-				<span class="sound-ok" title="Audio is running">Sound on</span>
+				<span class="sound-ok" title="Audio is ready">Sound on</span>
 			{/if}
 		</div>
 
-		{#if !audioRunning && !loadError}
-			<button
-				type="button"
-				class="audio-prompt"
-				onclick={onEnableSound}
-			>
+		{#if !audioReady && !loadError}
+			<button type="button" class="audio-prompt" onclick={onEnableSound}>
 				<span class="audio-prompt-dot" aria-hidden="true"></span>
 				Tap to enable sound
 			</button>
@@ -210,26 +178,6 @@
 		{/if}
 	</div>
 </div>
-
-<!--
-<p class="hint">
-	Click the canvas to enable audio. Choose Key (C-B) and Mode (major/minor)
-	above; natural triads follow that scale.
-</p>
-<p class="hint">
-	Degree hand (1-7): 1 index; 2 index+middle; 3 thumb-pinky touch with
-	index/middle/ring up; 4 four fingers thumb in; 5 open hand; 6
-	index+pinky (no thumb); 7 thumb out fist. Fist / unclear releases. Inward tilt
-	keeps the diatonic triad; outward flips maj/min (diminished becomes major).
-</p>
-<p class="hint">
-	Modifier hand (overrides tilt when clear). Palm toward camera: 1 finger =
-	maj7 if major triad / min7 if minor; 2 fingers = dom7 if major /
-	half-dim7 if minor (add thumb out for full dim7); 3 = sus2; 4 = sus4.
-	Palm away: 1 = aug, 2 = dim. Outward tilt on a diminished degree (e.g. 7
-	in major) becomes a major triad on that root.
-</p>
--->
 
 <style>
 	.instrument {

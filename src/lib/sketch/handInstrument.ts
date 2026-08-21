@@ -99,11 +99,20 @@ export interface InstrumentHudState {
 	handsDetected: number;
 }
 
+export interface AudioControls {
+	/** Call from a button click / touchend. Creates the sound graph if needed. */
+	unlock: () => void;
+	/** Whether unlock has succeeded and the graph is ready. */
+	isReady: () => boolean;
+}
+
 export interface HandInstrumentOptions {
 	getShowVideo: () => boolean;
 	getRootPc: () => PitchClass;
 	getMode: () => ScaleMode;
 	onHudUpdate?: (state: InstrumentHudState) => void;
+	onAudioControls?: (controls: AudioControls) => void;
+	onAudioReadyChange?: (ready: boolean) => void;
 }
 
 declare global {
@@ -175,6 +184,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		let filter: SoundFilter | undefined;
 		let reverb: SoundReverb | undefined;
 		let strings: StringState[] = [];
+		/** False until a user gesture creates/resumes the Web Audio graph (required on iOS). */
+		let soundReady = false;
 
 		let currentChordId: number | null = null;
 		let currentQuality: QualityName = 'major';
@@ -223,6 +234,85 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			return (y / h) * p.height;
 		}
 
+		function getNativeContext(): AudioContext | undefined {
+			try {
+				const fromSketch = (
+					p as p5 & { getAudioContext?: () => AudioContext }
+				).getAudioContext?.();
+				if (fromSketch) return fromSketch;
+				return (
+					window as unknown as { getAudioContext?: () => AudioContext }
+				).getAudioContext?.();
+			} catch {
+				return undefined;
+			}
+		}
+
+		function kickSilentBuffer(ctx: AudioContext): void {
+			try {
+				const buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+				const source = ctx.createBufferSource();
+				source.buffer = buffer;
+				source.connect(ctx.destination);
+				source.start(0);
+			} catch {
+				/* ignore */
+			}
+		}
+
+		/** Must run inside a user gesture on iOS or oscillators stay silent. */
+		function unlockAudioFromGesture(): void {
+			const ps = p as P5WithSound;
+			void ps.userStartAudio?.();
+
+			const ctx = getNativeContext();
+			if (ctx) {
+				kickSilentBuffer(ctx);
+				if (ctx.state !== 'running') {
+					void ctx.resume();
+				}
+				// Audible confirmation - native node, same gesture, same context.
+				try {
+					const osc = ctx.createOscillator();
+					const gain = ctx.createGain();
+					osc.type = 'sine';
+					osc.frequency.value = 523.25;
+					gain.gain.value = 0.0001;
+					osc.connect(gain);
+					gain.connect(ctx.destination);
+					const now = ctx.currentTime;
+					gain.gain.setValueAtTime(0.0001, now);
+					gain.gain.exponentialRampToValueAtTime(0.12, now + 0.02);
+					gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+					osc.start(now);
+					osc.stop(now + 0.32);
+				} catch {
+					/* ignore */
+				}
+			}
+
+			ensureSoundGraph();
+			soundReady = true;
+			options.onAudioReadyChange?.(true);
+
+			if (currentChordId && currentChordId > 0 && previousNotes) {
+				playVoicing(previousNotes, followerX);
+			}
+		}
+
+		function ensureSoundGraph(): void {
+			if (filter) return;
+			const ctors = soundCtors(p.constructor as typeof p5);
+			filter = new ctors.Filter('lowpass');
+			filter.freq(FILTER_CUTOFF);
+			filter.res(FILTER_RES);
+
+			reverb = new ctors.Reverb();
+			reverb.process(filter, 2.8, 3.2);
+			reverb.drywet(0.28);
+			reverb.amp(0.7);
+		}
+
 		p.preload = () => {
 			handPose = window.ml5.handPose({ maxHands: 2 });
 		};
@@ -242,19 +332,26 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				video = undefined;
 			}
 
-			const ctors = soundCtors(p.constructor as typeof p5);
-			filter = new ctors.Filter('lowpass');
-			filter.freq(FILTER_CUTOFF);
-			filter.res(FILTER_RES);
-
-			reverb = new ctors.Reverb();
-			reverb.process(filter, 2.8, 3.2);
-			reverb.drywet(0.32);
-			reverb.amp(0.65);
+			// Do not create p5.sound nodes here - on iOS they must be born inside
+			// a user gesture or they stay silent even after resume.
+			try {
+				const ctx = getNativeContext();
+				if (ctx && ctx.state === 'running') {
+					void ctx.suspend();
+				}
+			} catch {
+				/* ignore */
+			}
 
 			setupStrings();
 			followerX = lastHandTargetX = p.width / 2;
 			followerY = lastHandTargetY = p.height / 2;
+
+			options.onAudioControls?.({
+				unlock: unlockAudioFromGesture,
+				isReady: () => soundReady
+			});
+			options.onAudioReadyChange?.(false);
 		};
 
 		p.windowResized = () => {
@@ -263,12 +360,11 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		};
 
 		p.mousePressed = () => {
-			void (p as P5WithSound).userStartAudio();
+			unlockAudioFromGesture();
 		};
 
-		// iOS prefers touchEnded (committed gesture) over mousePressed/touchStarted.
 		p.touchEnded = () => {
-			void (p as P5WithSound).userStartAudio();
+			unlockAudioFromGesture();
 			return false;
 		};
 
@@ -683,6 +779,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 
 		function playVoicing(notes: number[], handX: number): void {
 			stopChord();
+			if (!soundReady) return;
+			ensureSoundGraph();
 			if (!filter) return;
 
 			const activatedStrings = notes.map((note) => nearestString(note));
