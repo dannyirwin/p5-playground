@@ -48,7 +48,8 @@ scale.
 Notes are synthesized with `p5.sound` oscillators and drawn as vibrating "strings".
 
 This is a **TypeScript [SvelteKit](https://svelte.dev/docs/kit) SPA** (`@sveltejs/adapter-static`,
-`ssr = false`).
+`ssr = false`). Live site: https://dannyirwin.github.io/p5-playground/ (deployed from `main`).
+Local `npm run dev` uses base `/`; CI sets `BASE_PATH=/p5-playground`.
 The sketch runs **client-only**: `HandInstrument.svelte` mounts a p5 instance-mode
 module (`src/lib/sketch/handInstrument.ts`) in `onMount`.
 Core `p5` comes from npm; `p5.sound` and `ml5` load from CDN inside the browser only.
