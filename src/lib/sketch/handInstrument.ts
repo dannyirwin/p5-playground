@@ -143,29 +143,29 @@ const SUSTAIN_LEVEL = 0.35;
 /** Vertical falloff (px) for proximity glow around the follower dot. */
 const PROXIMITY_FALLOFF = 52;
 /** Seconds to fade oscillators to silence on release / chord change. */
-const RELEASE_TIME = 0.7;
-const RELEASE_STOP_MS = 900;
+const RELEASE_TIME = 0.08;
+const RELEASE_STOP_MS = 100;
 /** Warm, slightly lofi onset - triangle + dark lowpass, almost no click. */
 const ATTACK_PITCH_RATIO = 1.004;
-const ATTACK_PITCH_TIME = 0.1;
-const ATTACK_AMP = 0.16;
-const SUSTAIN_AMP = 0.14;
-const ATTACK_AMP_TIME = 0.08;
+const ATTACK_PITCH_TIME = 0.06;
+const ATTACK_AMP = 0.18;
+const SUSTAIN_AMP = 0.15;
+const ATTACK_AMP_TIME = 0.04;
 const DETUNE_RATIO = 1.004;
-const DETUNE_AMP = 0.05;
+const DETUNE_AMP = 0.055;
 const FILTER_CUTOFF = 920;
 const FILTER_RES = 8;
 /** Chord / quality gesture settle (frames). */
-const SETTLE_FRAMES = 5;
-/** Longer hold so vertical voicing only shifts after the hand parks. */
-const VOICING_SETTLE_FRAMES = 36;
+const SETTLE_FRAMES = 4;
+/** Hold before committing a vertical voicing shift after the hand parks. */
+const VOICING_SETTLE_FRAMES = 10;
 /** Max follower Y drift (px) still counted as "parked". */
-const VOICING_SETTLE_Y = 12;
+const VOICING_SETTLE_Y = 14;
 /**
  * After a voicing commits, ignore Y motion until the hand leaves this
  * deadzone (px) - stops small drifts from flipping inversions.
  */
-const VOICING_COMMIT_DEADZONE = 48;
+const VOICING_COMMIT_DEADZONE = 40;
 /** Inclusive MIDI range for strings / vertical voicing (was 36-96). */
 const STRING_LOW_MIDI = 48;
 const STRING_HIGH_MIDI = 84;
@@ -263,6 +263,10 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		/** Must run inside a user gesture on iOS or oscillators stay silent. */
 		function unlockAudioFromGesture(): void {
 			const ps = p as P5WithSound;
+
+			// Create the p5.sound graph first so the shared AudioContext exists.
+			ensureSoundGraph();
+
 			void ps.userStartAudio?.();
 
 			const ctx = getNativeContext();
@@ -291,7 +295,6 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				}
 			}
 
-			ensureSoundGraph();
 			soundReady = true;
 			options.onAudioReadyChange?.(true);
 
@@ -834,14 +837,24 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			osc.start();
 			osc.freq(hz, ATTACK_PITCH_TIME);
 			osc.amp(attackAmp, ATTACK_AMP_TIME);
-			osc.amp(sustainAmp, 0.18, ATTACK_AMP_TIME);
+			osc.amp(sustainAmp, 0.1, ATTACK_AMP_TIME);
 			return osc;
 		}
 
 		function stopChord(): void {
 			for (const osc of voices) {
-				osc.amp(0, RELEASE_TIME);
-				setTimeout(() => osc.stop(), RELEASE_STOP_MS);
+				try {
+					osc.amp(0, RELEASE_TIME);
+					setTimeout(() => {
+						try {
+							osc.stop();
+						} catch {
+							/* already stopped */
+						}
+					}, RELEASE_STOP_MS);
+				} catch {
+					/* ignore teardown races */
+				}
 			}
 			voices = [];
 		}
