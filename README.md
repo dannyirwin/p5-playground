@@ -27,6 +27,13 @@ npm run check
 npm run build
 ```
 
+## Live site
+
+https://dannyirwin.github.io/p5-playground/
+
+Deploy is automatic from `main` via GitHub Actions (static build with `BASE_PATH=/p5-playground`).
+Local `npm run dev` still serves at `/` on http://localhost:5173.
+
 ## Playing
 
 Use the **Key** (C-B) and **Mode** (major/minor) controls to set the tonic.
