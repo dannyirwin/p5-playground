@@ -6,15 +6,19 @@
 		type InstrumentHudState
 	} from '$lib/sketch/handInstrument';
 	import { loadBrowserSketchDeps } from '$lib/sketch/loadDeps';
+	import { installAudioUnlock } from '$lib/sketch/audioUnlock';
 	import {
 		PITCH_CLASS_NAMES,
 		type PitchClass,
 		type ScaleMode
 	} from '$lib/sketch/harmony';
 
+	type P5WithAudio = p5 & { getAudioContext?: () => AudioContext };
+
 	let mountEl: HTMLDivElement | undefined = $state();
 	let showVideo = $state(false);
 	let loadError = $state('');
+	let audioRunning = $state(false);
 	let rootPc = $state<PitchClass>(0);
 	let mode = $state<ScaleMode>('major');
 
@@ -35,6 +39,7 @@
 	onMount(() => {
 		let instance: p5 | undefined;
 		let cancelled = false;
+		let audioUnlock: { destroy: () => void } | undefined;
 
 		void (async () => {
 			try {
@@ -59,7 +64,22 @@
 				if (cancelled) {
 					instance.remove();
 					instance = undefined;
+					return;
 				}
+
+				const sketch = instance as P5WithAudio;
+				audioUnlock = installAudioUnlock(
+					() => {
+						try {
+							return sketch.getAudioContext?.();
+						} catch {
+							return undefined;
+						}
+					},
+					(running) => {
+						audioRunning = running;
+					}
+				);
 			} catch (err) {
 				loadError = err instanceof Error ? err.message : 'Failed to start sketch';
 				console.error(err);
@@ -68,6 +88,7 @@
 
 		return () => {
 			cancelled = true;
+			audioUnlock?.destroy();
 			instance?.remove();
 		};
 	});
@@ -144,6 +165,13 @@
 				{showVideo ? 'Hide video' : 'Show video'}
 			</button>
 		</div>
+
+		{#if !audioRunning && !loadError}
+			<div class="audio-prompt" role="status" aria-live="polite">
+				<span class="audio-prompt-dot" aria-hidden="true"></span>
+				Tap anywhere to enable sound
+			</div>
+		{/if}
 
 		{#if loadError}
 			<p class="error">{loadError}</p>
@@ -261,6 +289,52 @@
 		border-radius: 4px;
 		cursor: pointer;
 		font: inherit;
+	}
+
+	.audio-prompt {
+		position: absolute;
+		bottom: 24px;
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 9px 16px;
+		background: rgb(10 12 13 / 78%);
+		border: 1px solid rgb(255 255 255 / 12%);
+		border-radius: 999px;
+		backdrop-filter: blur(6px);
+		font-size: 14px;
+		color: #e8ecef;
+		white-space: nowrap;
+		pointer-events: none;
+	}
+
+	.audio-prompt-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #f0a848;
+		box-shadow: 0 0 0 0 rgb(240 168 72 / 60%);
+		animation: audio-prompt-pulse 1.6s ease-out infinite;
+	}
+
+	@keyframes audio-prompt-pulse {
+		0% {
+			box-shadow: 0 0 0 0 rgb(240 168 72 / 55%);
+		}
+		70% {
+			box-shadow: 0 0 0 9px rgb(240 168 72 / 0%);
+		}
+		100% {
+			box-shadow: 0 0 0 0 rgb(240 168 72 / 0%);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.audio-prompt-dot {
+			animation: none;
+		}
 	}
 
 	.error {
