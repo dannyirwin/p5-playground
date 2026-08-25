@@ -52,7 +52,7 @@ export interface AudioControls {
 }
 
 /** Available visualizations. Unknown ids fall back to `strings`. */
-export type RenderModeId = 'strings';
+export type RenderModeId = 'strings' | 'boids';
 
 /**
  * Emitted on the frame a voicing starts or changes so renderers can pluck

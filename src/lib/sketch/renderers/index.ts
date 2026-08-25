@@ -1,4 +1,5 @@
 import type { Renderer, RenderModeId } from '../types.ts';
+import { createBoidsRenderer } from './boids.ts';
 import { createStringsRenderer } from './strings.ts';
 
 export const DEFAULT_RENDER_MODE: RenderModeId = 'strings';
@@ -9,7 +10,8 @@ interface RenderModeEntry {
 }
 
 const registry: Record<RenderModeId, RenderModeEntry> = {
-	strings: { label: 'Strings', create: createStringsRenderer }
+	strings: { label: 'Strings', create: createStringsRenderer },
+	boids: { label: 'Boids', create: createBoidsRenderer }
 };
 
 export const RENDER_MODES = Object.entries(registry).map(([id, entry]) => ({
