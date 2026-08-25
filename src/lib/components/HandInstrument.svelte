@@ -1,10 +1,15 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import type p5 from 'p5';
+	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
+	import { createSketch } from '$lib/sketch/createSketch';
+	import type { InstrumentHudState, RenderModeId } from '$lib/sketch/types';
 	import {
-		createHandInstrument,
-		type InstrumentHudState
-	} from '$lib/sketch/handInstrument';
+		DEFAULT_RENDER_MODE,
+		RENDER_MODES,
+		coerceRenderModeId
+	} from '$lib/sketch/renderers';
 	import { loadBrowserSketchDeps } from '$lib/sketch/loadDeps';
 	import {
 		PITCH_CLASS_NAMES,
@@ -12,8 +17,67 @@
 		type ScaleMode
 	} from '$lib/sketch/harmony';
 
+	let { mode: renderMode = DEFAULT_RENDER_MODE }: { mode?: RenderModeId } =
+		$props();
+
+	const KEY_STORAGE = 'p5-playground:rootPc';
+	const MODE_STORAGE = 'p5-playground:mode';
+	const SHOW_HANDS_STORAGE = 'p5-playground:showHands';
+
+	function loadRootPc(): PitchClass {
+		try {
+			const raw = localStorage.getItem(KEY_STORAGE);
+			if (raw === null) return 0;
+			const value = Number(raw);
+			if (Number.isInteger(value) && value >= 0 && value <= 11) {
+				return value as PitchClass;
+			}
+		} catch {
+			/* private mode / unavailable */
+		}
+		return 0;
+	}
+
+	function loadMode(): ScaleMode {
+		try {
+			const raw = localStorage.getItem(MODE_STORAGE);
+			if (raw === 'major' || raw === 'minor') return raw;
+		} catch {
+			/* private mode / unavailable */
+		}
+		return 'major';
+	}
+
+	function persistKeyMode(nextRoot: PitchClass, nextMode: ScaleMode): void {
+		try {
+			localStorage.setItem(KEY_STORAGE, String(nextRoot));
+			localStorage.setItem(MODE_STORAGE, nextMode);
+		} catch {
+			/* private mode / unavailable */
+		}
+	}
+
+	/** Hand overlay is on by default; only an explicit opt-out turns it off. */
+	function loadShowHands(): boolean {
+		try {
+			return localStorage.getItem(SHOW_HANDS_STORAGE) !== 'false';
+		} catch {
+			/* private mode / unavailable */
+		}
+		return true;
+	}
+
+	function persistShowHands(next: boolean): void {
+		try {
+			localStorage.setItem(SHOW_HANDS_STORAGE, String(next));
+		} catch {
+			/* private mode / unavailable */
+		}
+	}
+
 	let mountEl: HTMLDivElement | undefined = $state();
 	let showVideo = $state(false);
+	let showHands = $state(true);
 	let loadError = $state('');
 	let audioReady = $state(false);
 	let rootPc = $state<PitchClass>(0);
@@ -28,6 +92,8 @@
 		quality: null,
 		qualitySource: 'none',
 		modFacing: null,
+		bassMode: false,
+		bassActive: false,
 		notes: null,
 		followerX: 0,
 		followerY: 0,
@@ -35,6 +101,10 @@
 	});
 
 	onMount(() => {
+		rootPc = loadRootPc();
+		mode = loadMode();
+		showHands = loadShowHands();
+
 		let instance: p5 | undefined;
 		let cancelled = false;
 
@@ -47,8 +117,10 @@
 				if (cancelled || !mountEl) return;
 
 				instance = new P5(
-					createHandInstrument({
+					createSketch({
 						getShowVideo: () => showVideo,
+						getShowHands: () => showHands,
+						getRenderMode: () => renderMode,
 						getRootPc: () => rootPc,
 						getMode: () => mode,
 						onHudUpdate: (state) => {
@@ -85,6 +157,7 @@
 		const value = Number((event.currentTarget as HTMLSelectElement).value);
 		if (value >= 0 && value <= 11) {
 			rootPc = value as PitchClass;
+			persistKeyMode(rootPc, mode);
 		}
 	}
 
@@ -92,7 +165,22 @@
 		const value = (event.currentTarget as HTMLSelectElement).value;
 		if (value === 'major' || value === 'minor') {
 			mode = value;
+			persistKeyMode(rootPc, mode);
 		}
+	}
+
+	function onRenderModeChange(event: Event): void {
+		const next = coerceRenderModeId(
+			(event.currentTarget as HTMLSelectElement).value
+		);
+		if (next === renderMode) return;
+		// The route is the source of truth; the prop follows the URL back down.
+		void goto(next === DEFAULT_RENDER_MODE ? `${base}/` : `${base}/${next}`);
+	}
+
+	function onToggleHands(): void {
+		showHands = !showHands;
+		persistShowHands(showHands);
 	}
 
 	function onEnableSound(): void {
@@ -120,6 +208,18 @@
 					(mod{#if hud.modFacing === 'cam'}, palm cam{/if}{#if hud.modFacing === 'away'}, palm away{/if})
 				{:else if hud.qualitySource === 'triad'}
 					(triad)
+				{/if}
+			</p>
+			<p>
+				<span class="label">Bass</span>
+				{#if hud.bassMode && hud.bassActive && hud.notes}
+					on (−8ve)
+				{:else if hud.bassActive && !hud.bassMode}
+					on (−8ve, off next chord)
+				{:else if hud.bassMode}
+					on (ready)
+				{:else}
+					off
 				{/if}
 			</p>
 			<p>
@@ -153,8 +253,21 @@
 				</select>
 			</label>
 
+			<label>
+				Render
+				<select value={renderMode} onchange={onRenderModeChange}>
+					{#each RENDER_MODES as option (option.id)}
+						<option value={option.id}>{option.label}</option>
+					{/each}
+				</select>
+			</label>
+
 			<button type="button" onclick={() => (showVideo = !showVideo)}>
 				{showVideo ? 'Hide video' : 'Show video'}
+			</button>
+
+			<button type="button" onclick={onToggleHands}>
+				{showHands ? 'Hide hands' : 'Show hands'}
 			</button>
 
 			{#if !audioReady}

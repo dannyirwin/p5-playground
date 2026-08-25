@@ -8,16 +8,16 @@ import {
 	type ScaleMode,
 	type TriadQuality
 } from './harmony.ts';
-
-export interface HandKeypoint {
-	x: number;
-	y: number;
-}
-
-export interface Hand {
-	handedness: string;
-	keypoints: HandKeypoint[];
-}
+import type {
+	Hand,
+	HandKeypoint,
+	InstrumentCoreOptions,
+	InstrumentFrame,
+	InstrumentHudState,
+	NoteEvent,
+	QualityName,
+	Renderer
+} from './types.ts';
 
 interface HandPose {
 	detectStart: (
@@ -61,60 +61,6 @@ type P5WithSound = p5 & {
 	userStartAudio: () => Promise<void>;
 };
 
-interface StringState {
-	midi: number;
-	amplitude: number;
-	lastPluck: number;
-	active: boolean;
-	originX: number;
-	y: number;
-}
-
-type QualityName =
-	| 'major'
-	| 'minor'
-	| 'sus2'
-	| 'sus4'
-	| 'augmented'
-	| 'diminished'
-	| 'dominant7'
-	| 'major7'
-	| 'minor7'
-	| 'augmented7'
-	| 'halfDiminished7'
-	| 'diminished7'
-	| 'natural';
-
-export interface InstrumentHudState {
-	keyLabel: string;
-	degree: number | null;
-	tilt: 'inward' | 'outward' | 'neutral';
-	degreeFacing: 'cam' | 'away' | null;
-	quality: QualityName | null;
-	qualitySource: 'mod' | 'triad' | 'none';
-	modFacing: 'cam' | 'away' | null;
-	notes: number[] | null;
-	followerX: number;
-	followerY: number;
-	handsDetected: number;
-}
-
-export interface AudioControls {
-	/** Call from a button click / touchend. Creates the sound graph if needed. */
-	unlock: () => void;
-	/** Whether unlock has succeeded and the graph is ready. */
-	isReady: () => boolean;
-}
-
-export interface HandInstrumentOptions {
-	getShowVideo: () => boolean;
-	getRootPc: () => PitchClass;
-	getMode: () => ScaleMode;
-	onHudUpdate?: (state: InstrumentHudState) => void;
-	onAudioControls?: (controls: AudioControls) => void;
-	onAudioReadyChange?: (ready: boolean) => void;
-}
-
 declare global {
 	interface Window {
 		ml5: Ml5Api;
@@ -139,12 +85,9 @@ const qualityIntervals: Record<Exclude<QualityName, 'natural'>, number[]> = {
 const FOLLOWER_ACCEL = 0.05;
 const FOLLOWER_DAMPING = 0.8;
 const FOLLOWER_MAX_SPEED = 60;
-const SUSTAIN_LEVEL = 0.35;
-/** Vertical falloff (px) for proximity glow around the follower dot. */
-const PROXIMITY_FALLOFF = 52;
-/** Seconds to fade oscillators to silence on release / chord change. */
-const RELEASE_TIME = 0.08;
-const RELEASE_STOP_MS = 100;
+/** Soft fade into the reverb on release / chord change (new notes start immediately). */
+const RELEASE_TIME = 0.45;
+const RELEASE_STOP_MS = 520;
 /** Warm, slightly lofi onset - triangle + dark lowpass, almost no click. */
 const ATTACK_PITCH_RATIO = 1.004;
 const ATTACK_PITCH_TIME = 0.06;
@@ -155,8 +98,22 @@ const DETUNE_RATIO = 1.004;
 const DETUNE_AMP = 0.055;
 const FILTER_CUTOFF = 920;
 const FILTER_RES = 8;
+/** p5.sound Reverb: room size (seconds), decay, wet mix, output gain. */
+const REVERB_SECONDS = 4.2;
+const REVERB_DECAY = 5.5;
+const REVERB_DRYWET = 0.52;
+const REVERB_AMP = 0.85;
 /** Chord / quality gesture settle (frames). */
 const SETTLE_FRAMES = 4;
+/**
+ * Max distance between the two index MCPs (knuckles) to count as a tap,
+ * as a fraction of average palm length.
+ */
+const BASS_KNUCKLE_TAP_RATIO = 0.55;
+/** Max ms between two knuckle taps to count as a double-tap. */
+const BASS_DOUBLE_TAP_MS = 520;
+/** Ignore further taps briefly after a successful toggle. */
+const BASS_TOGGLE_COOLDOWN_MS = 450;
 /** Hold before committing a vertical voicing shift after the hand parks. */
 const VOICING_SETTLE_FRAMES = 10;
 /** Max follower Y drift (px) still counted as "parked". */
@@ -166,16 +123,25 @@ const VOICING_SETTLE_Y = 14;
  * deadzone (px) - stops small drifts from flipping inversions.
  */
 const VOICING_COMMIT_DEADZONE = 40;
-/** Inclusive MIDI range for strings / vertical voicing (was 36-96). */
-const STRING_LOW_MIDI = 48;
-const STRING_HIGH_MIDI = 84;
+/** Hand-Y voicing stays in the upper register; bass mode adds root −12. */
+const VOICING_LOW_MIDI = 48;
+const VOICING_HIGH_MIDI = 84;
+/** Vertical margin (px) the hand-Y → pitch mapping spans. */
+const VOICING_Y_MARGIN = 20;
 
 function soundCtors(P5: typeof p5): P5SoundConstructors {
 	return P5 as unknown as P5SoundConstructors;
 }
 
-/** p5 instance-mode sketch: webcam hand-tracking chord instrument. */
-export function createHandInstrument(options: HandInstrumentOptions): (p: p5) => void {
+/**
+ * p5 instance-mode controller: webcam hand tracking, gesture → harmony,
+ * synthesis and follower physics. Owns the draw orchestration but no
+ * visualization of its own beyond the video and hand-keypoint overlays;
+ * everything else is delegated to the active renderer.
+ */
+export function createInstrumentCore(
+	options: InstrumentCoreOptions
+): (p: p5) => void {
 	return (p: p5) => {
 		let video: p5.Element | undefined;
 		let handPose: HandPose | undefined;
@@ -183,9 +149,12 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		let voices: SoundOscillator[] = [];
 		let filter: SoundFilter | undefined;
 		let reverb: SoundReverb | undefined;
-		let strings: StringState[] = [];
 		/** False until a user gesture creates/resumes the Web Audio graph (required on iOS). */
 		let soundReady = false;
+
+		let activeRenderer: Renderer | undefined;
+		/** Consumed by the next frame so renderers see each voicing change once. */
+		let pendingNoteEvent: NoteEvent | null = null;
 
 		let currentChordId: number | null = null;
 		let currentQuality: QualityName = 'major';
@@ -201,6 +170,15 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		let chordLastRaw = 0;
 		let degreeTiltLast: 'inward' | 'outward' | 'neutral' = 'neutral';
 		let degreeFacingLast: boolean | null = null;
+
+		/** Bass: double-tap left/right index knuckles (MCP).
+		 *  `bassMode` is the latched toggle; `bassInCurrentVoicing` is what the
+		 *  sounding chord actually includes (updates only on chord change). */
+		let bassMode = false;
+		let bassInCurrentVoicing = false;
+		let bassKnucklesTogether = false;
+		let bassTapTimes: number[] = [];
+		let bassToggleCooldownUntil = 0;
 
 		let voicingCommitY = 0;
 		let voicingArmed = false;
@@ -311,9 +289,18 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			filter.res(FILTER_RES);
 
 			reverb = new ctors.Reverb();
-			reverb.process(filter, 2.8, 3.2);
-			reverb.drywet(0.28);
-			reverb.amp(0.7);
+			reverb.process(filter, REVERB_SECONDS, REVERB_DECAY);
+			reverb.drywet(REVERB_DRYWET);
+			reverb.amp(REVERB_AMP);
+		}
+
+		/** Swap in the selected renderer, letting the outgoing one tear down. */
+		function syncRenderer(): void {
+			const next = options.getRenderer();
+			if (next === activeRenderer) return;
+			activeRenderer?.destroy?.();
+			activeRenderer = next;
+			activeRenderer.setup?.(p);
 		}
 
 		p.preload = () => {
@@ -346,9 +333,10 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				/* ignore */
 			}
 
-			setupStrings();
 			followerX = lastHandTargetX = p.width / 2;
 			followerY = lastHandTargetY = p.height / 2;
+
+			syncRenderer();
 
 			options.onAudioControls?.({
 				unlock: unlockAudioFromGesture,
@@ -359,7 +347,7 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 
 		p.windowResized = () => {
 			p.resizeCanvas(p.windowWidth, p.windowHeight);
-			layoutStringYs();
+			activeRenderer?.resize?.(p);
 		};
 
 		p.mousePressed = () => {
@@ -372,6 +360,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 		};
 
 		p.draw = () => {
+			syncRenderer();
+
 			p.background(10, 12, 13);
 
 			if (options.getShowVideo() && video) {
@@ -382,6 +372,14 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				p.pop();
 			}
 
+			updateInputAndMusic();
+
+			activeRenderer?.draw(p, buildFrame());
+
+			if (options.getShowHands()) drawHandKeypoints();
+		};
+
+		function drawHandKeypoints(): void {
 			for (const hand of hands) {
 				p.noStroke();
 				p.fill(94, 230, 168);
@@ -389,143 +387,166 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 					p.circle(p.width - scaleCaptureX(kp.x), scaleCaptureY(kp.y), 6);
 				}
 			}
+		}
 
+		function buildFrame(): InstrumentFrame {
+			const { w, h } = captureSize();
+			const noteEvent = pendingNoteEvent;
+			pendingNoteEvent = null;
+			return {
+				width: p.width,
+				height: p.height,
+				millis: p.millis(),
+				deltaTime: p.deltaTime,
+				rootPc: options.getRootPc(),
+				mode: options.getMode(),
+				hands,
+				captureWidth: w,
+				captureHeight: h,
+				followerX,
+				followerY,
+				notes: previousNotes,
+				degree: currentChordId,
+				quality: currentChordId ? currentQuality : null,
+				bassActive: bassInCurrentVoicing,
+				noteEvent
+			};
+		}
+
+		function updateInputAndMusic(): void {
 			const { chordHand, modHand } = assignChordAndModHands(hands);
 
 			if (hands.length === 0) {
 				clearPlayingState();
-			} else {
-				if (chordHand) {
-					lastHandTargetX = scaleCaptureX(chordHand.keypoints[9].x);
-					lastHandTargetY = scaleCaptureY(chordHand.keypoints[9].y);
+				return;
+			}
+
+			if (chordHand) {
+				lastHandTargetX = scaleCaptureX(chordHand.keypoints[9].x);
+				lastHandTargetY = scaleCaptureY(chordHand.keypoints[9].y);
+			}
+			updateFollower(lastHandTargetX, lastHandTargetY);
+
+			const rootPc = options.getRootPc();
+			const mode = options.getMode();
+			if (rootPc !== lastRootPc || mode !== lastMode) {
+				lastRootPc = rootPc;
+				lastMode = mode;
+				if (currentChordId && currentChordId > 0) {
+					startVoicing(currentChordId, currentQuality, {
+						onlyIfChanged: false
+					});
 				}
-				updateFollower(lastHandTargetX, lastHandTargetY);
+			}
 
-				const rootPc = options.getRootPc();
-				const mode = options.getMode();
-				if (rootPc !== lastRootPc || mode !== lastMode) {
-					lastRootPc = rootPc;
-					lastMode = mode;
-					if (currentChordId && currentChordId > 0) {
-						startVoicing(currentChordId, currentQuality, {
-							onlyIfChanged: false
-						});
-					}
-				}
+			const rawChordId = chordHand ? classifyDegree(chordHand) : chordLastRaw;
+			if (chordHand) chordLastRaw = rawChordId;
 
-				const rawChordId = chordHand
-					? classifyDegree(chordHand)
-					: chordLastRaw;
-				if (chordHand) chordLastRaw = rawChordId;
+			const degreeTilt = chordHand ? getDegreeTilt(chordHand) : degreeTiltLast;
+			if (chordHand) degreeTiltLast = degreeTilt;
 
-				const degreeTilt = chordHand
-					? getDegreeTilt(chordHand)
-					: degreeTiltLast;
-				if (chordHand) degreeTiltLast = degreeTilt;
+			const rawDegreeFacing = chordHand
+				? palmFacesCamera(chordHand)
+				: degreeFacingLast;
+			if (chordHand && rawDegreeFacing !== null) {
+				degreeFacingLast = rawDegreeFacing;
+			}
+			const degreeFacing = rawDegreeFacing ?? degreeFacingLast;
+			const counterpart = degreeTilt === 'outward' || degreeFacing === false;
 
-				const rawDegreeFacing = chordHand
-					? palmFacesCamera(chordHand)
-					: degreeFacingLast;
-				if (chordHand && rawDegreeFacing !== null) {
-					degreeFacingLast = rawDegreeFacing;
-				}
-				const degreeFacing = rawDegreeFacing ?? degreeFacingLast;
-				const counterpart =
-					degreeTilt === 'outward' || degreeFacing === false;
-
-				const triadQuality =
-					rawChordId > 0
-						? resolveDegreeTriad(rawChordId, mode, counterpart)
-						: 'major';
-				const modFacing = modHand ? palmFacesCamera(modHand) : null;
-				const modQuality = modHand
+			const triadQuality =
+				rawChordId > 0
+					? resolveDegreeTriad(rawChordId, mode, counterpart)
+					: 'major';
+			const modFacing = modHand ? palmFacesCamera(modHand) : null;
+			const bassTapping = updateBassGesture(hands);
+			const modQuality =
+				modHand && !bassTapping
 					? getModifierQuality(modHand, triadQuality)
 					: null;
-				const rawQuality: QualityName = modQuality ?? triadQuality;
-				const facingTag =
-					degreeFacing === false
-						? 'away'
-						: degreeFacing === true
-							? 'cam'
-							: 'edge';
-				const harmonyKey = `${rawChordId}|${degreeTilt}|${facingTag}|${rawQuality}`;
+			const rawQuality: QualityName = modQuality ?? triadQuality;
+			const facingTag =
+				degreeFacing === false
+					? 'away'
+					: degreeFacing === true
+						? 'cam'
+						: 'edge';
+			const harmonyKey = `${rawChordId}|${degreeTilt}|${facingTag}|${rawQuality}`;
 
-				if (harmonyKey === harmonyLastRaw) harmonyStable++;
-				else {
-					harmonyStable = 0;
-					harmonyLastRaw = harmonyKey;
-				}
+			if (harmonyKey === harmonyLastRaw) harmonyStable++;
+			else {
+				harmonyStable = 0;
+				harmonyLastRaw = harmonyKey;
+			}
 
-				if (harmonyStable === SETTLE_FRAMES) {
-					const chordChanged = rawChordId !== currentChordId;
-					const qualityChanged = rawQuality !== currentQuality;
-					if (chordChanged || qualityChanged) {
-						if (rawChordId === 0) {
-							clearPlayingState();
-						} else {
-							startVoicing(rawChordId, rawQuality, {
-								onlyIfChanged: false
-							});
-							currentChordId = rawChordId;
-							currentQuality = rawQuality;
-						}
-					}
-					currentTilt = degreeTilt;
-					currentDegreeFacing = degreeFacing;
-				}
-
-				if (currentChordId && currentChordId > 0) {
-					if (!voicingArmed) {
-						if (p.abs(followerY - voicingCommitY) >= VOICING_COMMIT_DEADZONE) {
-							voicingArmed = true;
-							voicingAnchorY = followerY;
-							voicingStable = 0;
-						}
-					} else if (p.abs(followerY - voicingAnchorY) <= VOICING_SETTLE_Y) {
-						voicingStable++;
-						if (voicingStable >= VOICING_SETTLE_FRAMES) {
-							const desired = desiredVoicing(currentChordId, currentQuality);
-							if (!sameNoteSet(previousNotes, desired)) {
-								playVoicing(desired, followerX);
-								previousNotes = desired;
-								voicingCommitY = followerY;
-								voicingArmed = false;
-							}
-						}
+			if (harmonyStable === SETTLE_FRAMES) {
+				const chordChanged = rawChordId !== currentChordId;
+				const qualityChanged = rawQuality !== currentQuality;
+				if (chordChanged || qualityChanged) {
+					if (rawChordId === 0) {
+						clearPlayingState();
 					} else {
+						startVoicing(rawChordId, rawQuality, {
+							onlyIfChanged: false
+						});
+						currentChordId = rawChordId;
+						currentQuality = rawQuality;
+					}
+				}
+				currentTilt = degreeTilt;
+				currentDegreeFacing = degreeFacing;
+			}
+
+			if (currentChordId && currentChordId > 0) {
+				if (!voicingArmed) {
+					if (p.abs(followerY - voicingCommitY) >= VOICING_COMMIT_DEADZONE) {
+						voicingArmed = true;
 						voicingAnchorY = followerY;
 						voicingStable = 0;
 					}
+				} else if (p.abs(followerY - voicingAnchorY) <= VOICING_SETTLE_Y) {
+					voicingStable++;
+					if (voicingStable >= VOICING_SETTLE_FRAMES) {
+						const desired = desiredVoicing(
+							currentChordId,
+							currentQuality,
+							bassInCurrentVoicing
+						);
+						if (!sameNoteSet(previousNotes, desired)) {
+							playVoicing(desired, followerX);
+							previousNotes = desired;
+							voicingCommitY = followerY;
+							voicingArmed = false;
+						}
+					}
+				} else {
+					voicingAnchorY = followerY;
+					voicingStable = 0;
 				}
-
-				reportHud({
-					keyLabel: formatKeyLabel(rootPc, mode),
-					degree: currentChordId,
-					tilt: degreeTilt,
-					degreeFacing:
-						degreeFacing === true
-							? 'cam'
-							: degreeFacing === false
-								? 'away'
-								: null,
-					quality: currentQuality,
-					qualitySource: modQuality ? 'mod' : currentChordId ? 'triad' : 'none',
-					modFacing:
-						modFacing === true ? 'cam' : modFacing === false ? 'away' : null,
-					notes: previousNotes,
-					followerX: p.width - followerX,
-					followerY: followerY,
-					handsDetected: hands.length
-				});
 			}
 
-			updateStrings();
-			drawStrings();
-
-			p.noStroke();
-			p.fill(94, 230, 168, 180);
-			p.circle(p.width - followerX, followerY, 18);
-		};
+			reportHud({
+				keyLabel: formatKeyLabel(rootPc, mode),
+				degree: currentChordId,
+				tilt: degreeTilt,
+				degreeFacing:
+					degreeFacing === true
+						? 'cam'
+						: degreeFacing === false
+							? 'away'
+							: null,
+				quality: currentQuality,
+				qualitySource: modQuality ? 'mod' : currentChordId ? 'triad' : 'none',
+				modFacing:
+					modFacing === true ? 'cam' : modFacing === false ? 'away' : null,
+				bassMode,
+				bassActive: bassInCurrentVoicing,
+				notes: previousNotes,
+				followerX: p.width - followerX,
+				followerY: followerY,
+				handsDetected: hands.length
+			});
+		}
 
 		function clearPlayingState(): void {
 			if (currentChordId !== null || previousNotes !== null || voices.length > 0) {
@@ -544,7 +565,12 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			voicingArmed = false;
 			voicingAnchorY = followerY;
 			voicingStable = 0;
-			for (const s of strings) s.active = false;
+			// Keep bassMode sticky when hands drop; with nothing sounding the
+			// latch is already "in effect" for the next chord.
+			bassInCurrentVoicing = bassMode;
+			bassKnucklesTogether = false;
+			bassTapTimes = [];
+			bassToggleCooldownUntil = 0;
 			reportHud({
 				keyLabel: formatKeyLabel(options.getRootPc(), options.getMode()),
 				degree: null,
@@ -553,6 +579,8 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 				quality: null,
 				qualitySource: 'none',
 				modFacing: null,
+				bassMode,
+				bassActive: bassInCurrentVoicing,
 				notes: null,
 				followerX: p.width - followerX,
 				followerY: followerY,
@@ -620,10 +648,93 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			return a !== null && pitchClassKey(a) === pitchClassKey(b);
 		}
 
-		function desiredVoicing(chordId: number, quality: QualityName): number[] {
+		function desiredVoicing(
+			chordId: number,
+			quality: QualityName,
+			withBass: boolean
+		): number[] {
 			const targetPCs = chordPitchClassesForQuality(chordId, quality);
 			const targetMidi = targetMidiFromHandY(followerY);
-			return closestVoicingToDot(targetPCs, targetMidi);
+			const notes = closestVoicingToDot(targetPCs, targetMidi);
+			return applyBassNote(notes, chordId, quality, withBass);
+		}
+
+		/** Root of the chord, one octave below the voiced root. */
+		function applyBassNote(
+			notes: number[],
+			chordId: number,
+			quality: QualityName,
+			withBass: boolean
+		): number[] {
+			if (!withBass || notes.length === 0) return notes;
+			const rootPc = chordPitchClassesForQuality(chordId, quality)[0];
+			const roots = notes.filter((n) => ((n % 12) + 12) % 12 === rootPc);
+			const chordRoot =
+				roots.length > 0 ? Math.min(...roots) : Math.min(...notes);
+			const bass = chordRoot - 12;
+			if (notes.some((n) => n === bass)) return notes;
+			return [bass, ...notes];
+		}
+
+		function setBassMode(next: boolean): void {
+			bassMode = next;
+			// Nothing sounding — apply the latch immediately so HUD/state match.
+			if (!currentChordId || currentChordId === 0 || previousNotes === null) {
+				bassInCurrentVoicing = next;
+			}
+			// Otherwise wait for the next chord / quality change.
+		}
+
+		/**
+		 * Bass toggle: quick double-tap of the two index-finger knuckles (MCP).
+		 * Returns whether knuckles are currently together (skip mod quality).
+		 */
+		function updateBassGesture(detected: Hand[]): boolean {
+			const now = p.millis();
+			const together = indexKnucklesTogether(detected);
+
+			if (now < bassToggleCooldownUntil) {
+				bassKnucklesTogether = together;
+				return together;
+			}
+
+			if (together && !bassKnucklesTogether) {
+				bassKnucklesTogether = true;
+			} else if (!together && bassKnucklesTogether) {
+				bassKnucklesTogether = false;
+				bassTapTimes = bassTapTimes.filter(
+					(t) => now - t <= BASS_DOUBLE_TAP_MS
+				);
+				bassTapTimes.push(now);
+				if (bassTapTimes.length >= 2) {
+					setBassMode(!bassMode);
+					bassTapTimes = [];
+					bassToggleCooldownUntil = now + BASS_TOGGLE_COOLDOWN_MS;
+				}
+			}
+			return together;
+		}
+
+		/** True when both hands' index MCPs (landmark 5) are close in capture space. */
+		function indexKnucklesTogether(detected: Hand[]): boolean {
+			if (detected.length < 2) return false;
+			const a = detected[0].keypoints[5];
+			const b = detected[1].keypoints[5];
+			const palmA = p.dist(
+				detected[0].keypoints[0].x,
+				detected[0].keypoints[0].y,
+				detected[0].keypoints[9].x,
+				detected[0].keypoints[9].y
+			);
+			const palmB = p.dist(
+				detected[1].keypoints[0].x,
+				detected[1].keypoints[0].y,
+				detected[1].keypoints[9].x,
+				detected[1].keypoints[9].y
+			);
+			const scale = (palmA + palmB) / 2;
+			if (scale < 1) return false;
+			return p.dist(a.x, a.y, b.x, b.y) < scale * BASS_KNUCKLE_TAP_RATIO;
 		}
 
 		function startVoicing(
@@ -631,7 +742,9 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			quality: QualityName,
 			opts: { onlyIfChanged?: boolean } = {}
 		): void {
-			const voicing = desiredVoicing(chordId, quality);
+			// Chord / quality change: apply the latched bass toggle from here on.
+			bassInCurrentVoicing = bassMode;
+			const voicing = desiredVoicing(chordId, quality, bassInCurrentVoicing);
 			if (opts.onlyIfChanged && samePitchClasses(previousNotes, voicing)) {
 				return;
 			}
@@ -668,155 +781,33 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			followerY += followerVelY;
 		}
 
-		function setupStrings(): void {
-			strings = [];
-			for (let m = STRING_LOW_MIDI; m <= STRING_HIGH_MIDI; m++) {
-				strings.push({
-					midi: m,
-					amplitude: 0,
-					lastPluck: 0,
-					active: false,
-					originX: p.width / 2,
-					y: 0
-				});
-			}
-			layoutStringYs();
-		}
-
-		function layoutStringYs(): void {
-			if (strings.length === 0) return;
-			strings.forEach((s, i) => {
-				s.y = p.map(i, 0, strings.length - 1, p.height - 20, 20);
-			});
-		}
-
-		function nearestString(midi: number): StringState {
-			return strings.reduce((best, s) =>
-				Math.abs(s.midi - midi) < Math.abs(best.midi - midi) ? s : best
-			);
-		}
-
-		function updateStrings(): void {
-			for (const s of strings) {
-				const floor = s.active ? SUSTAIN_LEVEL : 0;
-				if (Math.abs(s.amplitude - floor) > 0.001) {
-					const tau = s.active
-						? p.map(s.midi, STRING_LOW_MIDI, STRING_HIGH_MIDI, 700, 280)
-						: p.map(s.midi, STRING_LOW_MIDI, STRING_HIGH_MIDI, 220, 110);
-					s.amplitude = floor + (s.amplitude - floor) * p.exp(-p.deltaTime / tau);
-				} else {
-					s.amplitude = floor;
-				}
-			}
-		}
-
-		function drawStrings(): void {
-			p.noFill();
-			for (const s of strings) {
-				const elapsed = p.millis() - s.lastPluck;
-				const rootPcNow = options.getRootPc();
-				const isRoot = ((s.midi % 12) + 12) % 12 === rootPcNow;
-				const proximity = p.exp(-p.abs(s.y - followerY) / PROXIMITY_FALLOFF);
-				const amp = p.constrain(s.amplitude, 0, 1);
-
-				// Idle glow tracks the follower so nearby (playable) notes read clearly;
-				// roots stay brighter overall for key context. Pluck amplitude can still
-				// push a string to full intensity.
-				const idleAlpha = p.lerp(
-					isRoot ? 72 : 18,
-					isRoot ? 230 : 175,
-					proximity
-				);
-				const alpha = Math.max(idleAlpha, p.lerp(0, 255, amp));
-				const weight = p.lerp(
-					isRoot ? 1.25 : 0.85,
-					2.15,
-					Math.max(proximity * 0.55, amp)
-				);
-
-				if (isRoot) {
-					// Brighter, slightly warmer teal so scale roots stand out.
-					p.stroke(
-						p.lerp(150, 220, proximity),
-						p.lerp(235, 255, proximity),
-						p.lerp(200, 235, proximity),
-						alpha
-					);
-				} else {
-					p.stroke(
-						p.lerp(70, 110, proximity),
-						p.lerp(160, 230, proximity),
-						p.lerp(130, 180, proximity),
-						alpha
-					);
-				}
-				p.strokeWeight(weight);
-
-				const originX = p.width - followerX;
-				const spatialFreq = p.map(
-					s.midi,
-					STRING_LOW_MIDI,
-					STRING_HIGH_MIDI,
-					0.07,
-					0.48
-				);
-				const travelSpeed = p.map(
-					s.midi,
-					STRING_LOW_MIDI,
-					STRING_HIGH_MIDI,
-					0.012,
-					0.055
-				);
-
-				p.beginShape();
-				for (let x = 0; x <= p.width; x += 4) {
-					const distFromOrigin = p.abs(x - originX);
-					const envelope = p.exp(-distFromOrigin / 90);
-					const wiggle = p.sin(distFromOrigin * spatialFreq - elapsed * travelSpeed);
-					const displacement = s.amplitude * 7 * envelope * wiggle;
-					p.vertex(x, s.y + displacement);
-				}
-				p.endShape();
-			}
-		}
-
 		function playVoicing(notes: number[], handX: number): void {
 			stopChord();
 			if (!soundReady) return;
 			ensureSoundGraph();
 			if (!filter) return;
 
-			const activatedStrings = notes.map((note) => nearestString(note));
-			const activatedSet = new Set(activatedStrings);
-
-			for (const s of strings) {
-				if (activatedSet.has(s)) {
-					if (!s.active) {
-						s.amplitude = 1;
-						s.lastPluck = p.millis();
-					}
-					s.originX = p.width - handX;
-					s.active = true;
-				} else {
-					s.active = false;
-				}
-			}
+			// Renderers pluck off this event, so it is raised exactly where the
+			// chord becomes audible - visuals stay in step with the sound.
+			pendingNoteEvent = { notes: [...notes], originX: p.width - handX };
 
 			const ctors = soundCtors(p.constructor as typeof p5);
 			filter.freq(FILTER_CUTOFF);
 
 			for (const note of notes) {
 				const hz = midiNumberToHz(note);
-				voices.push(
-					startTone(ctors, 'triangle', hz, ATTACK_AMP, SUSTAIN_AMP)
-				);
+				const bassish = note < VOICING_LOW_MIDI;
+				const attack = bassish ? ATTACK_AMP * 1.35 : ATTACK_AMP;
+				const sustain = bassish ? SUSTAIN_AMP * 1.4 : SUSTAIN_AMP;
+				const detune = bassish ? DETUNE_AMP * 0.7 : DETUNE_AMP;
+				voices.push(startTone(ctors, 'triangle', hz, attack, sustain));
 				voices.push(
 					startTone(
 						ctors,
 						'triangle',
 						hz * DETUNE_RATIO,
-						DETUNE_AMP * 1.2,
-						DETUNE_AMP
+						detune * 1.2,
+						detune
 					)
 				);
 			}
@@ -888,13 +879,13 @@ export function createHandInstrument(options: HandInstrumentOptions): (p: p5) =>
 			return p.constrain(
 				p.map(
 					y,
-					p.height - 20,
-					20,
-					STRING_LOW_MIDI,
-					STRING_HIGH_MIDI
+					p.height - VOICING_Y_MARGIN,
+					VOICING_Y_MARGIN,
+					VOICING_LOW_MIDI,
+					VOICING_HIGH_MIDI
 				),
-				STRING_LOW_MIDI,
-				STRING_HIGH_MIDI
+				VOICING_LOW_MIDI,
+				VOICING_HIGH_MIDI
 			);
 		}
 

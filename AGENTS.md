@@ -51,8 +51,22 @@ This is a **TypeScript [SvelteKit](https://svelte.dev/docs/kit) SPA** (`@sveltej
 `ssr = false`). Live site: https://dannyirwin.github.io/p5-playground/ (deployed from `main`).
 Local `npm run dev` uses base `/`; CI sets `BASE_PATH=/p5-playground`.
 The sketch runs **client-only**: `HandInstrument.svelte` mounts a p5 instance-mode
-module (`src/lib/sketch/handInstrument.ts`) in `onMount`.
+sketch built by `src/lib/sketch/createSketch.ts` in `onMount`.
 Core `p5` comes from npm; `p5.sound` and `ml5` load from CDN inside the browser only.
+
+The controller and the visualization are separate.
+`src/lib/sketch/instrumentCore.ts` owns the webcam, ml5 hand tracking, gesture
+classification, voicing/harmony state, the `p5.sound` graph, and follower physics.
+Each frame it hands an `InstrumentFrame` (see `src/lib/sketch/types.ts`) to the active
+`Renderer`, including a `noteEvent` whenever a voicing starts or changes, so renderers
+can react to the music without touching audio.
+Renderers live in `src/lib/sketch/renderers/` and are registered in that directory's
+`index.ts`; `strings.ts` is the vibrating-strings visualization and owns the follower dot.
+The render mode is selected by the URL (`src/routes/[[mode]]/+page.svelte` serves `/` and
+`/strings`, coercing unknown modes to `strings`) and by the **Render** dropdown, which
+navigates so the route stays the source of truth.
+Adding a visualization means adding a renderer plus one registry entry; no input or audio
+code changes.
 
 | Task | Command |
 | --- | --- |
@@ -117,7 +131,9 @@ UI **Key** and **Mode** controls set the tonic pitch class and major/natural-min
   The cloud VM has no camera, so `createCapture(VIDEO)` and `ml5.handPose` cannot track hands - this is expected.
   The canvas, the "strings" visualization, the follower dot, the text overlays, and the interactive
   controls (clicking the canvas enables audio; the "Show video" button toggles the webcam
-  overlay) still render and work without a camera.
+  overlay; the "Render" dropdown picks the visualization) still render and work without a camera.
+  The hand overlay toggle ("Hide hands" / "Show hands", on by default and persisted in
+  `localStorage`) has nothing to draw without a camera.
   The follower dot tracks the chord hand's position, so with no webcam it stays parked at
   canvas center rather than following the mouse - this is expected, not a bug.
 - Expected console noise in the headless VM: `No webcam found` / `Requested device not found`,

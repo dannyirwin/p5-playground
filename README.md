@@ -72,7 +72,10 @@ When a pose is clear, it overrides degree tilt.
 **Palm away from camera:** 1 finger = augmented, 2 fingers = diminished.
 
 Click the canvas to enable audio.
-Toggle **Show video** to overlay the webcam feed.
+Toggle **Show video** to overlay the webcam feed, and **Show hands** (on by default) for the
+hand landmark overlay.
+Pick a visualization with the **Render** dropdown; it is also part of the URL, so `/` and
+`/strings` both open the strings view.
 
 ## Cursor Cloud
 
