@@ -36,8 +36,9 @@ Local `npm run dev` still serves at `/` on http://localhost:5173.
 
 ## Playing
 
-Use the **Key** (C-B) and **Mode** (major/minor) controls to set the tonic.
-Natural triads are diatonic in that key and mode.
+Use the **Key** (C-B) and **Mode** controls to set the tonic and scale
+(major, natural / harmonic / melodic minor, church modes, pentatonics, blues).
+Natural triads are built from stacked scale thirds in that key and mode.
 
 ### Degree hand (1-7)
 

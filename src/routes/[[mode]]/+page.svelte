@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import HandInstrument from '$lib/components/HandInstrument.svelte';
-	import { coerceRenderModeId } from '$lib/sketch/renderers';
+	import { coerceP5RenderModeId } from '$lib/instrument/modes/ids';
 
-	const mode = $derived(coerceRenderModeId(page.params.mode));
+	const renderMode = $derived(coerceP5RenderModeId(page.params.mode));
 </script>
 
-<HandInstrument {mode} />
+<HandInstrument {renderMode} />

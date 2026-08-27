@@ -43,8 +43,8 @@ Two hands are read via [ml5.js](https://ml5js.org/) `handPose`.
 One hand selects a scale degree (poses 1-7) and can tilt inward/outward to keep or
 flip the diatonic triad quality; the other hand can override quality with explicit
 modifier poses (sus, aug/dim, sevenths).
-Key (C-B) and mode (major/minor) are chosen in the UI so natural triads follow that
-scale.
+Key (C-B) and mode (major, natural/harmonic/melodic minor, church modes,
+pentatonics, blues) are chosen in the UI so natural triads follow that scale.
 Notes are synthesized with `p5.sound` oscillators and drawn as vibrating "strings".
 
 This is a **TypeScript [SvelteKit](https://svelte.dev/docs/kit) SPA** (`@sveltejs/adapter-static`,
@@ -55,9 +55,9 @@ sketch built by `src/lib/sketch/createSketch.ts` in `onMount`.
 Core `p5` comes from npm; `p5.sound` and `ml5` load from CDN inside the browser only.
 
 The controller and the visualization are separate.
-`src/lib/sketch/instrumentCore.ts` owns the webcam, ml5 hand tracking, gesture
-classification, voicing/harmony state, the `p5.sound` graph, and follower physics.
-Each frame it hands an `InstrumentFrame` (see `src/lib/sketch/types.ts`) to the active
+`src/lib/sketch/instrumentCore.ts` owns the webcam, ml5 hand tracking, p5.sound graph, and draw orchestration.
+Gesture classification, voicing math, and settle logic live in `src/lib/instrument/` (see `ARCHITECTURE.md`).
+Each frame the core hands an `InstrumentFrame` (see `src/lib/sketch/types.ts`) to the active
 `Renderer`, including a `noteEvent` whenever a voicing starts or changes, so renderers
 can react to the music without touching audio.
 Renderers live in `src/lib/sketch/renderers/` and are registered in that directory's
@@ -74,6 +74,7 @@ code changes.
 | Dev | `npm run dev` |
 | Open | http://localhost:5173 |
 | Typecheck | `npm run check` |
+| Unit tests | `npm test` |
 | Build | `npm run build` |
 
 Definition of done for sketch/app changes: `npm run check` and `npm run build` both pass.
@@ -118,7 +119,8 @@ Palm away from camera:
 
 No clear pose / hand absent: degree + tilt triad.
 
-UI **Key** and **Mode** controls set the tonic pitch class and major/natural-minor scale.
+UI **Key** and **Mode** controls set the tonic pitch class and scale
+(major, minors, modes, pentatonic, blues).
 
 ## Cursor Cloud
 

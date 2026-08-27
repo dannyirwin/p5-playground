@@ -1,232 +1,170 @@
 import type p5 from 'p5';
+import {
+	colorForMidi,
+	createBoidsEngine,
+	type BoidsEngine,
+	type BoidsSimRng
+} from '../../boids/engine.ts';
+import { clampBoidCount, DEFAULT_BOID_COUNT } from '../../boids/boidCount.ts';
+import { drawBoidsGlowCanvas } from '../../boids/glowDraw.ts';
+import type { VoicingChange } from '../../instrument/events.ts';
 import type { InstrumentFrame, Renderer } from '../types.ts';
+import type { BoidsParams } from './boidsParams.ts';
+import {
+	DEFAULT_BOIDS_PARAMS,
+	DEFAULT_FLOCK_PRESET,
+	type BoidsProfileBridge
+} from './boidsParams.ts';
+import type { BoidsProfileId } from './boidsProfiles.ts';
+import type { FlockPreset } from '../../boids/flockSeparation.ts';
 
-interface Boid {
-	x: number;
-	y: number;
-	vx: number;
-	vy: number;
+/** Live-tunable params on a boids renderer instance. */
+export interface BoidsParamsBridge extends BoidsProfileBridge {
+	getParams(): BoidsParams;
+	snapshotParams(): BoidsParams;
+	getBoidCount?(): number;
+	setBoidCount?(count: number): void;
+	/** Baseline params/flock before dynamic population scaling — use for save/load. */
+	snapshotBaseline?(): { params: BoidsParams; flock: FlockPreset };
+	/** Apply saved preset exactly; disables dynamic retuning until profile reset. */
+	applyUserPreset?(params: BoidsParams, flock?: FlockPreset): void;
+	getFlockPreset?(): FlockPreset;
+	applyFlockPreset?(flock: FlockPreset): void;
 }
 
-/**
- * Flocking weights and radii in canvas pixels. Speeds / forces are per
- * reference frame (see `FRAME_MS`), so the sim looks the same at any FPS.
- * Kept as one object so music hooks can later modulate it per frame.
- */
-interface FlockParams {
-	count: number;
-	sep: number;
-	ali: number;
-	coh: number;
-	sepRadius: number;
-	aliRadius: number;
-	cohRadius: number;
-	maxSpeed: number;
-	minSpeed: number;
-	maxForce: number;
+export type BoidsRenderer = Renderer & BoidsParamsBridge;
+
+function createP5Rng(p: p5): BoidsSimRng {
+	return {
+		random(max = 1) {
+			return p.random(max);
+		},
+		randomMin(min: number, max: number) {
+			return p.random(min, max);
+		},
+		noise(x: number, y: number, z: number) {
+			return p.noise(x, y, z);
+		}
+	};
 }
 
-const FLOCK: FlockParams = {
-	count: 150,
-	sep: 1.6,
-	ali: 1,
-	coh: 0.85,
-	sepRadius: 26,
-	aliRadius: 58,
-	cohRadius: 78,
-	maxSpeed: 3.2,
-	minSpeed: 1.1,
-	maxForce: 0.11
-};
-
-/** Speeds / forces above are expressed per frame of this length. */
-const FRAME_MS = 1000 / 60;
-/** Tab-out and first-frame spikes would teleport boids across the canvas. */
-const MAX_DELTA_MS = 50;
-/** Triangle body: length along velocity, width across it. */
-const BOID_LENGTH = 8;
-const BOID_WIDTH = 5;
-
-/** Shortest signed delta on a wrapped axis, so neighbours meet across edges. */
-function wrapDelta(delta: number, size: number): number {
-	const half = size / 2;
-	if (delta > half) return delta - size;
-	if (delta < -half) return delta + size;
-	return delta;
-}
-
-function wrapPosition(value: number, size: number): number {
-	if (size <= 0) return value;
-	return ((value % size) + size) % size;
-}
-
-function limit(x: number, y: number, max: number): { x: number; y: number } {
-	const mag = Math.hypot(x, y);
-	if (mag <= max || mag === 0) return { x, y };
-	const scale = max / mag;
-	return { x: x * scale, y: y * scale };
-}
-
-/** Steer from a desired velocity toward the current one, force-limited. */
-function steer(
-	desiredX: number,
-	desiredY: number,
-	boid: Boid,
-	weight: number
-): { x: number; y: number } {
-	const mag = Math.hypot(desiredX, desiredY);
-	if (mag === 0) return { x: 0, y: 0 };
-	const scale = FLOCK.maxSpeed / mag;
-	const force = limit(
-		desiredX * scale - boid.vx,
-		desiredY * scale - boid.vy,
-		FLOCK.maxForce
-	);
-	return { x: force.x * weight, y: force.y * weight };
-}
-
-/** Reynolds flocking on a torus: separation, alignment, cohesion. */
-export function createBoidsRenderer(): Renderer {
-	let boids: Boid[] = [];
-	let accX: number[] = [];
-	let accY: number[] = [];
-
-	function seed(p: p5): void {
-		boids = [];
-		accX = [];
-		accY = [];
-		for (let i = 0; i < FLOCK.count; i++) {
-			const angle = p.random(p.TWO_PI);
-			const speed = p.random(FLOCK.minSpeed, FLOCK.maxSpeed);
-			boids.push({
-				x: p.random(p.width),
-				y: p.random(p.height),
-				vx: Math.cos(angle) * speed,
-				vy: Math.sin(angle) * speed
-			});
-			accX.push(0);
-			accY.push(0);
+function drawWindField(p: p5, engine: BoidsEngine, width: number, height: number, millis: number): void {
+	const params = engine.getParams();
+	if (!params.windEnabled) return;
+	const step = Math.max(16, params.windFieldStep);
+	const scale = params.windFieldScale;
+	p.push();
+	p.strokeWeight(1);
+	for (let y = step * 0.5; y < height; y += step) {
+		for (let x = step * 0.5; x < width; x += step) {
+			const field = engine.sampleField(x, y, width, height, millis);
+			const mag = Math.hypot(field.x, field.y);
+			if (mag < 0.001) continue;
+			const len = Math.min(scale * 1.6, scale * (0.35 + mag * 1.4));
+			const ux = (field.x / mag) * len;
+			const uy = (field.y / mag) * len;
+			const x2 = x + ux;
+			const y2 = y + uy;
+			const a = Math.min(180, 70 + mag * 90);
+			p.stroke(160, 200, 220, a);
+			p.line(x, y, x2, y2);
+			const hx = -uy * 0.28;
+			const hy = ux * 0.28;
+			p.line(x2, y2, x2 - ux * 0.28 + hx, y2 - uy * 0.28 + hy);
+			p.line(x2, y2, x2 - ux * 0.28 - hx, y2 - uy * 0.28 - hy);
 		}
 	}
+	p.pop();
+}
 
-	function accumulateForces(width: number, height: number): void {
-		const sepRadiusSq = FLOCK.sepRadius * FLOCK.sepRadius;
-		const aliRadiusSq = FLOCK.aliRadius * FLOCK.aliRadius;
-		const cohRadiusSq = FLOCK.cohRadius * FLOCK.cohRadius;
-
-		for (let i = 0; i < boids.length; i++) {
-			const boid = boids[i];
-			let sepX = 0;
-			let sepY = 0;
-			let aliX = 0;
-			let aliY = 0;
-			let cohX = 0;
-			let cohY = 0;
-			let sepCount = 0;
-			let aliCount = 0;
-			let cohCount = 0;
-
-			for (let j = 0; j < boids.length; j++) {
-				if (j === i) continue;
-				const other = boids[j];
-				const dx = wrapDelta(other.x - boid.x, width);
-				const dy = wrapDelta(other.y - boid.y, height);
-				const distSq = dx * dx + dy * dy;
-				if (distSq === 0) continue;
-
-				if (distSq < sepRadiusSq) {
-					// Push away harder the closer the neighbour is.
-					sepX -= dx / distSq;
-					sepY -= dy / distSq;
-					sepCount++;
-				}
-				if (distSq < aliRadiusSq) {
-					aliX += other.vx;
-					aliY += other.vy;
-					aliCount++;
-				}
-				if (distSq < cohRadiusSq) {
-					cohX += dx;
-					cohY += dy;
-					cohCount++;
-				}
-			}
-
-			let fx = 0;
-			let fy = 0;
-			if (sepCount > 0) {
-				const force = steer(sepX, sepY, boid, FLOCK.sep);
-				fx += force.x;
-				fy += force.y;
-			}
-			if (aliCount > 0) {
-				const force = steer(aliX, aliY, boid, FLOCK.ali);
-				fx += force.x;
-				fy += force.y;
-			}
-			if (cohCount > 0) {
-				// Offsets are already relative to this boid, so their mean points
-				// at the local centre of mass.
-				const force = steer(cohX, cohY, boid, FLOCK.coh);
-				fx += force.x;
-				fy += force.y;
-			}
-
-			accX[i] = fx;
-			accY[i] = fy;
-		}
+function drawColorCounts(p: p5, engine: BoidsEngine): void {
+	const params = engine.getParams();
+	if (!params.showCounts) return;
+	const notes = engine.getSoundingNotes();
+	const counts = engine.getAssignedCountByMidi();
+	const boids = engine.getBoids();
+	let blanks = 0;
+	for (const boid of boids) {
+		if (boid.targetMidi === null || boid.decaying) blanks++;
 	}
 
-	function integrate(width: number, height: number, steps: number): void {
-		for (let i = 0; i < boids.length; i++) {
-			const boid = boids[i];
-			const velocity = limit(
-				boid.vx + accX[i] * steps,
-				boid.vy + accY[i] * steps,
-				FLOCK.maxSpeed
-			);
-			boid.vx = velocity.x;
-			boid.vy = velocity.y;
+	const quota = notes && notes.length > 0 ? engine.getNoteQuota(notes.length) : 0;
+	const lineH = 18;
+	const pad = 12;
+	const rows = notes && notes.length > 0 ? notes.length + 2 : 2;
+	const boxW = 168;
+	const boxH = pad * 2 + rows * lineH;
+	const x0 = pad;
+	const y0 = p.height - boxH - pad;
 
-			// Keep the flock moving so it never settles into a static clump.
-			const speed = Math.hypot(boid.vx, boid.vy);
-			if (speed > 0 && speed < FLOCK.minSpeed) {
-				const scale = FLOCK.minSpeed / speed;
-				boid.vx *= scale;
-				boid.vy *= scale;
-			}
+	p.push();
+	p.noStroke();
+	p.fill(8, 10, 12, 180);
+	p.rect(x0, y0, boxW, boxH, 6);
 
-			boid.x = wrapPosition(boid.x + boid.vx * steps, width);
-			boid.y = wrapPosition(boid.y + boid.vy * steps, height);
+	p.textAlign(p.LEFT, p.TOP);
+	p.textSize(12);
+	let y = y0 + 6;
+
+	p.fill(200, 210, 215);
+	p.text(`quota ${quota}  blank ${blanks}`, x0 + 10, y);
+	y += lineH;
+
+	if (notes && notes.length > 0) {
+		for (const midi of notes) {
+			const [cr, cg, cb] = colorForMidi(midi, notes, engine.getSoundingBassActive());
+			const n = counts.get(midi) ?? 0;
+			p.fill(cr, cg, cb);
+			p.circle(x0 + 16, y + 7, 9);
+			p.fill(230, 235, 240);
+			p.text(`midi ${midi}  ${n}`, x0 + 28, y);
+			y += lineH;
 		}
+	} else {
+		p.fill(140, 150, 155);
+		p.text('no chord', x0 + 10, y);
+		y += lineH;
 	}
 
-	function drawBoids(p: p5): void {
-		p.noStroke();
-		for (const boid of boids) {
-			const speed = Math.hypot(boid.vx, boid.vy);
-			// Faster boids read brighter, so flow through the flock is visible.
-			const heat = p.constrain(speed / FLOCK.maxSpeed, 0, 1);
-			p.fill(
-				p.lerp(58, 108, heat),
-				p.lerp(150, 226, heat),
-				p.lerp(124, 176, heat),
-				215
-			);
+	const totalAssigned = [...counts.values()].reduce((a, b) => a + b, 0);
+	p.fill(160, 170, 175);
+	p.text(`assigned ${totalAssigned}`, x0 + 10, y);
+	p.pop();
+}
 
-			p.push();
-			p.translate(boid.x, boid.y);
-			p.rotate(Math.atan2(boid.vy, boid.vx));
-			p.triangle(
-				BOID_LENGTH,
-				0,
-				-BOID_LENGTH * 0.55,
-				BOID_WIDTH * 0.5,
-				-BOID_LENGTH * 0.55,
-				-BOID_WIDTH * 0.5
-			);
-			p.pop();
+/** Reynolds flocking on a torus; chord notes assign attractors + colors. */
+export function createBoidsRenderer(initialParams?: BoidsParams): BoidsRenderer {
+	const paramsSeed: BoidsParams = {
+		...(initialParams ?? DEFAULT_BOIDS_PARAMS),
+		boidCount: clampBoidCount(initialParams?.boidCount ?? DEFAULT_BOID_COUNT)
+	};
+	let flockSeed: FlockPreset = DEFAULT_FLOCK_PRESET;
+	let engine: BoidsEngine | undefined;
+	let p5Ref: p5 | undefined;
+	let lastW = 0;
+	let lastH = 0;
+
+	function createEngine(p: p5): BoidsEngine {
+		return createBoidsEngine(
+			paramsSeed.boidCount,
+			paramsSeed,
+			createP5Rng(p),
+			flockSeed
+		);
+	}
+
+	function recreateEngine(p: p5): void {
+		engine?.destroy();
+		engine = createEngine(p);
+		if (lastW > 0 && lastH > 0) engine.seed(lastW, lastH);
+	}
+
+	function ensureEngine(p: p5): BoidsEngine {
+		p5Ref = p;
+		if (!engine) {
+			engine = createEngine(p);
 		}
+		return engine;
 	}
 
 	return {
@@ -234,32 +172,116 @@ export function createBoidsRenderer(): Renderer {
 		label: 'Boids',
 
 		setup(p) {
-			seed(p);
+			ensureEngine(p).seed(p.width, p.height);
+			lastW = p.width;
+			lastH = p.height;
 		},
 
 		resize(p) {
-			// Keep headings and the flock's structure; just fold positions back in.
-			for (const boid of boids) {
-				boid.x = wrapPosition(boid.x, p.width);
-				boid.y = wrapPosition(boid.y, p.height);
+			lastW = p.width;
+			lastH = p.height;
+			ensureEngine(p).resize(p.width, p.height);
+		},
+
+		onVoicing(p, event, audioMix) {
+			const sim = ensureEngine(p);
+			sim.applyVoicing(event, p.width, p.height, p.millis(), audioMix);
+		},
+
+		onRelease() {
+			engine?.releaseVoicing();
+		},
+
+		getParams() {
+			return engine?.getParams() ?? { ...paramsSeed };
+		},
+
+		getBoidCount() {
+			return engine?.count ?? paramsSeed.boidCount;
+		},
+
+		setBoidCount(count: number) {
+			const next = clampBoidCount(count);
+			if (next === (engine?.count ?? paramsSeed.boidCount)) {
+				paramsSeed.boidCount = next;
+				engine?.applyParams({ ...engine.getParams(), boidCount: next });
+				return;
 			}
+			paramsSeed.boidCount = next;
+			if (p5Ref) recreateEngine(p5Ref);
+		},
+
+		applyParams(next: BoidsParams) {
+			const countChanged =
+				next.boidCount !== undefined &&
+				clampBoidCount(next.boidCount) !== (engine?.count ?? paramsSeed.boidCount);
+			Object.assign(paramsSeed, next);
+			paramsSeed.boidCount = clampBoidCount(paramsSeed.boidCount);
+			if (countChanged && p5Ref) {
+				recreateEngine(p5Ref);
+				return;
+			}
+			engine?.applyParams({ ...next, boidCount: paramsSeed.boidCount });
+		},
+
+		applyFlockPreset(flock: FlockPreset) {
+			flockSeed = flock;
+			engine?.applyFlockPreset(flock);
+		},
+
+		setProfileBaseline(id: BoidsProfileId) {
+			engine?.setProfileBaseline(id);
+		},
+
+		getFlockPreset() {
+			return engine?.getFlockPreset() ?? flockSeed;
+		},
+
+		snapshotParams() {
+			return engine?.snapshotParams() ?? { ...paramsSeed };
+		},
+
+		snapshotBaseline() {
+			return (
+				engine?.snapshotBaseline() ?? {
+					params: { ...paramsSeed },
+					flock: flockSeed
+				}
+			);
+		},
+
+		applyUserPreset(params: BoidsParams, flock?: FlockPreset) {
+			const countChanged =
+				params.boidCount !== undefined &&
+				clampBoidCount(params.boidCount) !== (engine?.count ?? paramsSeed.boidCount);
+			Object.assign(paramsSeed, params);
+			paramsSeed.boidCount = clampBoidCount(paramsSeed.boidCount);
+			if (flock) flockSeed = flock;
+			if (countChanged && p5Ref) {
+				recreateEngine(p5Ref);
+				engine?.applyUserPreset({ ...params, boidCount: paramsSeed.boidCount }, flock);
+				return;
+			}
+			engine?.applyUserPreset({ ...params, boidCount: paramsSeed.boidCount }, flock);
 		},
 
 		draw(p, frame: InstrumentFrame) {
-			// setup can run before the canvas has real dimensions.
-			if (boids.length === 0) seed(p);
-
-			const dt = p.constrain(frame.deltaTime, 0, MAX_DELTA_MS);
-			const steps = dt / FRAME_MS;
-			accumulateForces(frame.width, frame.height);
-			integrate(frame.width, frame.height, steps);
-			drawBoids(p);
+			lastW = frame.width;
+			lastH = frame.height;
+			const sim = ensureEngine(p);
+			if (sim.getBoids().length === 0) sim.seed(frame.width, frame.height);
+			sim.step(frame.width, frame.height, frame.millis, frame.deltaTime, frame.audioMix);
+			if (sim.getParams().showWindField) {
+				drawWindField(p, sim, frame.width, frame.height, frame.millis);
+			}
+			drawBoidsGlowCanvas(p.drawingContext as CanvasRenderingContext2D, sim, frame.millis);
+			drawColorCounts(p, sim);
 		},
 
 		destroy() {
-			boids = [];
-			accX = [];
-			accY = [];
+			engine?.destroy();
+			engine = undefined;
+			p5Ref = undefined;
 		}
 	};
 }

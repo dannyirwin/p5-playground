@@ -1,3 +1,5 @@
+import { isP5SoundLoaded } from '../instrument/player/adapters/p5/soundTypes.ts';
+
 function loadScript(src: string): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const existing = document.querySelector<HTMLScriptElement>(`script[src="${src}"]`);
@@ -52,6 +54,10 @@ export function loadBrowserSketchDeps(): Promise<void> {
 				'https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/addons/p5.sound.min.js'
 			);
 			await loadScript('https://unpkg.com/ml5@1/dist/ml5.js');
+
+			if (!isP5SoundLoaded()) {
+				throw new Error('p5.sound failed to attach to window.p5');
+			}
 		})();
 	}
 
