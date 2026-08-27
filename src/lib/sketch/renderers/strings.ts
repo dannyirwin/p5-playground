@@ -1,5 +1,12 @@
 import type p5 from 'p5';
 import type { InstrumentFrame, Renderer } from '../types.ts';
+import type { VoicingChange } from '../../instrument/events.ts';
+import { VOICING_HIGH_MIDI } from '../../instrument/harmony/constants.ts';
+import {
+	closestVoicingToDot,
+	handYFromMidi,
+	targetMidiFromHandY
+} from '../../instrument/harmony/voicing.ts';
 
 interface StringState {
 	midi: number;
@@ -10,24 +17,27 @@ interface StringState {
 	y: number;
 }
 
-/** Inclusive MIDI range for drawn strings (includes bass octave). */
+/** Drawn range — extends a bit below voicing for octave-bass notes. */
 const STRING_LOW_MIDI = 36;
-const STRING_HIGH_MIDI = 84;
-/** Vertical margin (px) so the outer strings stay off the canvas edge. */
-const STRING_Y_MARGIN = 20;
+const STRING_HIGH_MIDI = VOICING_HIGH_MIDI;
 const SUSTAIN_LEVEL = 0.35;
-/** Vertical falloff (px) for proximity glow around the follower dot. */
-const PROXIMITY_FALLOFF = 52;
+/** Soft glow falloff in semitones from the cursor's target pitch. */
+const PROXIMITY_SEMITONES = 5.5;
 
 /** Vibrating-strings visualization: one string per semitone, plucked by voicings. */
 export function createStringsRenderer(): Renderer {
 	let strings: StringState[] = [];
+	let layoutHeight = 0;
 
 	function layoutStringYs(p: p5): void {
-		if (strings.length === 0) return;
-		strings.forEach((s, i) => {
-			s.y = p.map(i, 0, strings.length - 1, p.height - STRING_Y_MARGIN, STRING_Y_MARGIN);
-		});
+		layoutHeight = p.height;
+		for (const s of strings) {
+			s.y = handYFromMidi(s.midi, p.height);
+		}
+	}
+
+	function ensureLayout(p: p5): void {
+		if (layoutHeight !== p.height) layoutStringYs(p);
 	}
 
 	function nearestString(midi: number): StringState {
@@ -67,16 +77,29 @@ export function createStringsRenderer(): Renderer {
 	}
 
 	function drawStrings(p: p5, frame: InstrumentFrame): void {
+		const targetMidi = targetMidiFromHandY(frame.followerY, frame.height);
+		// Chord tones closest to the cursor — same picker the synth uses.
+		const cursorChord = frame.notes
+			? closestVoicingToDot(
+					[...new Set(frame.notes.map((n) => ((n % 12) + 12) % 12))],
+					targetMidi
+				)
+			: [];
+		const cursorChordSet = new Set(cursorChord);
+
 		p.noFill();
 		for (const s of strings) {
 			const elapsed = frame.millis - s.lastPluck;
 			const isRoot = ((s.midi % 12) + 12) % 12 === frame.rootPc;
-			const proximity = p.exp(-p.abs(s.y - frame.followerY) / PROXIMITY_FALLOFF);
+			const nearCursor = Math.exp(
+				-Math.abs(s.midi - targetMidi) / PROXIMITY_SEMITONES
+			);
+			const isCursorChord = cursorChordSet.has(s.midi);
+			const proximity = isCursorChord
+				? Math.max(nearCursor, 0.85)
+				: nearCursor * (frame.notes ? 0.35 : 1);
 			const amp = p.constrain(s.amplitude, 0, 1);
 
-			// Idle glow tracks the follower so nearby (playable) notes read clearly;
-			// roots stay brighter overall for key context. Pluck amplitude can still
-			// push a string to full intensity.
 			const idleAlpha = p.lerp(
 				isRoot ? 72 : 18,
 				isRoot ? 230 : 175,
@@ -89,8 +112,9 @@ export function createStringsRenderer(): Renderer {
 				Math.max(proximity * 0.55, amp)
 			);
 
-			if (isRoot) {
-				// Brighter, slightly warmer teal so scale roots stand out.
+			if (isCursorChord && !s.active) {
+				p.stroke(120, 220, 180, 160 + 60 * nearCursor);
+			} else if (isRoot) {
 				p.stroke(
 					p.lerp(150, 220, proximity),
 					p.lerp(235, 255, proximity),
@@ -108,20 +132,8 @@ export function createStringsRenderer(): Renderer {
 			p.strokeWeight(weight);
 
 			const originX = frame.width - frame.followerX;
-			const spatialFreq = p.map(
-				s.midi,
-				STRING_LOW_MIDI,
-				STRING_HIGH_MIDI,
-				0.07,
-				0.48
-			);
-			const travelSpeed = p.map(
-				s.midi,
-				STRING_LOW_MIDI,
-				STRING_HIGH_MIDI,
-				0.012,
-				0.055
-			);
+			const spatialFreq = p.map(s.midi, STRING_LOW_MIDI, STRING_HIGH_MIDI, 0.07, 0.48);
+			const travelSpeed = p.map(s.midi, STRING_LOW_MIDI, STRING_HIGH_MIDI, 0.012, 0.055);
 
 			p.beginShape();
 			for (let x = 0; x <= p.width; x += 4) {
@@ -133,6 +145,20 @@ export function createStringsRenderer(): Renderer {
 			}
 			p.endShape();
 		}
+	}
+
+	/** Register marker on the voicing Y for the cursor's target pitch. */
+	function drawOctaveCursor(p: p5, frame: InstrumentFrame): void {
+		const targetMidi = targetMidiFromHandY(frame.followerY, frame.height);
+		const y = handYFromMidi(targetMidi, frame.height);
+		const x = frame.width - frame.followerX;
+		p.noStroke();
+		p.fill(94, 230, 168, 210);
+		p.circle(x, y, 16);
+		p.noFill();
+		p.stroke(94, 230, 168, 140);
+		p.strokeWeight(1.5);
+		p.circle(x, y, 26);
 	}
 
 	return {
@@ -158,24 +184,28 @@ export function createStringsRenderer(): Renderer {
 			layoutStringYs(p);
 		},
 
+		onVoicing(p, event, _audioMix) {
+			pluck(event.notes, event.originX, p.millis());
+		},
+
+		onRelease() {
+			for (const s of strings) s.active = false;
+		},
+
 		draw(p, frame) {
+			ensureLayout(p);
 			if (frame.notes === null) {
 				for (const s of strings) s.active = false;
-			}
-			if (frame.noteEvent) {
-				pluck(frame.noteEvent.notes, frame.noteEvent.originX, frame.millis);
 			}
 
 			updateAmplitudes(p, frame.deltaTime);
 			drawStrings(p, frame);
-
-			p.noStroke();
-			p.fill(94, 230, 168, 180);
-			p.circle(frame.width - frame.followerX, frame.followerY, 18);
+			drawOctaveCursor(p, frame);
 		},
 
 		destroy() {
 			strings = [];
+			layoutHeight = 0;
 		}
 	};
 }

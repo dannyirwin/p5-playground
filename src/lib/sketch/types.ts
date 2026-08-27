@@ -1,5 +1,17 @@
 import type p5 from 'p5';
+import type { VoicingChange } from '../instrument/events.ts';
+import type { InstrumentHudState, RendererAudioMix } from '../instrument/hud.ts';
 import type { PitchClass, ScaleMode } from './harmony.ts';
+import type { InstrumentPlayer } from '../instrument/player/types.ts';
+import type { QualityName } from '../instrument/quality.ts';
+import type { RenderModeId } from '../instrument/modes/ids.ts';
+import type { BoidsParams } from './renderers/boidsParams.ts';
+import type { BoidsParamsBridge } from './renderers/boids.ts';
+
+export type { InstrumentPlayer };
+export type { InstrumentHudState, RendererAudioMix, RenderModeId, QualityName };
+export type { PitchClass, ScaleMode };
+export type { InstrumentHostId } from '../instrument/modes/ids.ts';
 
 export interface HandKeypoint {
 	x: number;
@@ -11,57 +23,21 @@ export interface Hand {
 	keypoints: HandKeypoint[];
 }
 
-export type QualityName =
-	| 'major'
-	| 'minor'
-	| 'sus2'
-	| 'sus4'
-	| 'augmented'
-	| 'diminished'
-	| 'dominant7'
-	| 'major7'
-	| 'minor7'
-	| 'augmented7'
-	| 'halfDiminished7'
-	| 'diminished7'
-	| 'natural';
-
-export interface InstrumentHudState {
-	keyLabel: string;
-	degree: number | null;
-	tilt: 'inward' | 'outward' | 'neutral';
-	degreeFacing: 'cam' | 'away' | null;
-	quality: QualityName | null;
-	qualitySource: 'mod' | 'triad' | 'none';
-	modFacing: 'cam' | 'away' | null;
-	/** Latched toggle from the modifier gesture. */
-	bassMode: boolean;
-	/** Whether the currently sounding chord includes the −8ve root. */
-	bassActive: boolean;
-	notes: number[] | null;
-	followerX: number;
-	followerY: number;
-	handsDetected: number;
-}
-
 export interface AudioControls {
-	/** Call from a button click / touchend. Creates the sound graph if needed. */
 	unlock: () => void;
-	/** Whether unlock has succeeded and the graph is ready. */
 	isReady: () => boolean;
 }
 
-/** Available visualizations. Unknown ids fall back to `strings`. */
-export type RenderModeId = 'strings';
-
 /**
- * Emitted on the frame a voicing starts or changes so renderers can pluck
- * without knowing anything about the audio graph.
+ * @deprecated Use VoicingChange via frame.voicingChange or renderer.onVoicing.
  */
 export interface NoteEvent {
 	notes: number[];
-	/** Canvas-space (mirrored) x the voicing was struck from. */
 	originX: number;
+}
+
+export function noteEventFromVoicing(event: VoicingChange): NoteEvent {
+	return { notes: event.notes, originX: event.originX };
 }
 
 /** Snapshot of controller + music state handed to the active renderer each draw. */
@@ -72,21 +48,19 @@ export interface InstrumentFrame {
 	deltaTime: number;
 	rootPc: PitchClass;
 	mode: ScaleMode;
-	/** Keypoints are in webcam capture pixels, not canvas pixels. */
 	hands: Hand[];
 	captureWidth: number;
 	captureHeight: number;
-	/**
-	 * Follower position in unmirrored canvas space: draw at
-	 * `frame.width - frame.followerX` to line up with the mirrored video.
-	 */
 	followerX: number;
 	followerY: number;
 	notes: number[] | null;
 	degree: number | null;
 	quality: QualityName | null;
 	bassActive: boolean;
+	voicingChange: VoicingChange | null;
+	/** @deprecated Prefer voicingChange. */
 	noteEvent: NoteEvent | null;
+	audioMix: RendererAudioMix;
 }
 
 export interface Renderer {
@@ -95,10 +69,11 @@ export interface Renderer {
 	setup?(p: p5): void;
 	resize?(p: p5): void;
 	draw(p: p5, frame: InstrumentFrame): void;
+	onVoicing?(p: p5, event: VoicingChange, audioMix: RendererAudioMix): void;
+	onRelease?(p: p5): void;
 	destroy?(): void;
 }
 
-/** Options shared by the controller core and the sketch factory. */
 export interface InstrumentOptions {
 	getShowVideo: () => boolean;
 	getShowHands: () => boolean;
@@ -111,8 +86,11 @@ export interface InstrumentOptions {
 
 export interface InstrumentCoreOptions extends InstrumentOptions {
 	getRenderer: () => Renderer;
+	getPlayer: (p: p5) => InstrumentPlayer;
 }
 
 export interface SketchOptions extends InstrumentOptions {
 	getRenderMode: () => RenderModeId;
+	initialBoidsParams?: BoidsParams;
+	onBoidsParamsBridge?: (bridge: BoidsParamsBridge | null) => void;
 }

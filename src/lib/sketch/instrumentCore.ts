@@ -1,23 +1,20 @@
 import type p5 from 'p5';
-import {
-	diatonicTriadQuality,
-	formatKeyLabel,
-	rootMidiFromPc,
-	scaleDegreeMidi,
-	type PitchClass,
-	type ScaleMode,
-	type TriadQuality
-} from './harmony.ts';
+import { createHarmonyController } from '../instrument/harmony/controller.ts';
+import type { AudioHost } from '../instrument/hosts.ts';
+import type { VoicingChange } from '../instrument/events.ts';
+import { createInputRecognizer } from '../instrument/input/recognizer.ts';
+import { createInstrumentSession } from '../instrument/session.ts';
+import type { PitchClass, ScaleMode } from './harmony.ts';
 import type {
 	Hand,
-	HandKeypoint,
 	InstrumentCoreOptions,
 	InstrumentFrame,
 	InstrumentHudState,
-	NoteEvent,
-	QualityName,
-	Renderer
+	Renderer,
+	RendererAudioMix
 } from './types.ts';
+import { noteEventFromVoicing } from './types.ts';
+import { drawHandKeypoints as drawHandsOverlay } from '../instrument/overlay/hands.ts';
 
 interface HandPose {
 	detectStart: (
@@ -30,33 +27,6 @@ interface Ml5Api {
 	handPose: (options: { maxHands: number }) => HandPose;
 }
 
-interface SoundFilter {
-	freq: (value: number, rampTime?: number) => void;
-	res: (value: number) => void;
-}
-
-interface SoundOscillator {
-	disconnect: () => void;
-	connect: (unit: SoundFilter) => void;
-	freq: (value: number, rampTime?: number) => void;
-	amp: (value: number, rampTime?: number, timeFromNow?: number) => void;
-	start: () => void;
-	stop: () => void;
-}
-
-interface SoundReverb {
-	process: (src: SoundFilter, seconds?: number, decayRate?: number) => void;
-	drywet: (value: number) => void;
-	amp: (value: number) => void;
-}
-
-interface P5SoundConstructors {
-	Filter: new (type: string) => SoundFilter;
-	Oscillator: new (type: string) => SoundOscillator;
-	Reverb: new () => SoundReverb;
-}
-
-/** Instance methods added by the p5.sound addon at runtime. */
 type P5WithSound = p5 & {
 	userStartAudio: () => Promise<void>;
 };
@@ -67,77 +37,9 @@ declare global {
 	}
 }
 
-const qualityIntervals: Record<Exclude<QualityName, 'natural'>, number[]> = {
-	major: [0, 4, 7],
-	minor: [0, 3, 7],
-	sus2: [0, 2, 7],
-	sus4: [0, 5, 7],
-	augmented: [0, 4, 8],
-	diminished: [0, 3, 6],
-	dominant7: [0, 4, 7, 10],
-	major7: [0, 4, 7, 11],
-	minor7: [0, 3, 7, 10],
-	augmented7: [0, 4, 8, 10],
-	halfDiminished7: [0, 3, 6, 10],
-	diminished7: [0, 3, 6, 9]
-};
-
-const FOLLOWER_ACCEL = 0.05;
-const FOLLOWER_DAMPING = 0.8;
-const FOLLOWER_MAX_SPEED = 60;
-/** Soft fade into the reverb on release / chord change (new notes start immediately). */
-const RELEASE_TIME = 0.45;
-const RELEASE_STOP_MS = 520;
-/** Warm, slightly lofi onset - triangle + dark lowpass, almost no click. */
-const ATTACK_PITCH_RATIO = 1.004;
-const ATTACK_PITCH_TIME = 0.06;
-const ATTACK_AMP = 0.18;
-const SUSTAIN_AMP = 0.15;
-const ATTACK_AMP_TIME = 0.04;
-const DETUNE_RATIO = 1.004;
-const DETUNE_AMP = 0.055;
-const FILTER_CUTOFF = 920;
-const FILTER_RES = 8;
-/** p5.sound Reverb: room size (seconds), decay, wet mix, output gain. */
-const REVERB_SECONDS = 4.2;
-const REVERB_DECAY = 5.5;
-const REVERB_DRYWET = 0.52;
-const REVERB_AMP = 0.85;
-/** Chord / quality gesture settle (frames). */
-const SETTLE_FRAMES = 4;
 /**
- * Max distance between the two index MCPs (knuckles) to count as a tap,
- * as a fraction of average palm length.
- */
-const BASS_KNUCKLE_TAP_RATIO = 0.55;
-/** Max ms between two knuckle taps to count as a double-tap. */
-const BASS_DOUBLE_TAP_MS = 520;
-/** Ignore further taps briefly after a successful toggle. */
-const BASS_TOGGLE_COOLDOWN_MS = 450;
-/** Hold before committing a vertical voicing shift after the hand parks. */
-const VOICING_SETTLE_FRAMES = 10;
-/** Max follower Y drift (px) still counted as "parked". */
-const VOICING_SETTLE_Y = 14;
-/**
- * After a voicing commits, ignore Y motion until the hand leaves this
- * deadzone (px) - stops small drifts from flipping inversions.
- */
-const VOICING_COMMIT_DEADZONE = 40;
-/** Hand-Y voicing stays in the upper register; bass mode adds root −12. */
-const VOICING_LOW_MIDI = 48;
-const VOICING_HIGH_MIDI = 84;
-/** Vertical margin (px) the hand-Y → pitch mapping spans. */
-const VOICING_Y_MARGIN = 20;
-
-function soundCtors(P5: typeof p5): P5SoundConstructors {
-	return P5 as unknown as P5SoundConstructors;
-}
-
-/**
- * p5 instance-mode controller: webcam hand tracking, gesture → harmony,
- * synthesis and follower physics. Owns the draw orchestration but no
- * visualization of its own beyond the video and hand-keypoint overlays;
- * everything else is delegated to the active renderer.
+ * p5 host adapter: webcam capture, coordinate transforms, hand overlay,
+ * and session wiring. Music logic lives in `createInstrumentSession`.
  */
 export function createInstrumentCore(
 	options: InstrumentCoreOptions
@@ -146,53 +48,38 @@ export function createInstrumentCore(
 		let video: p5.Element | undefined;
 		let handPose: HandPose | undefined;
 		let hands: Hand[] = [];
-		let voices: SoundOscillator[] = [];
-		let filter: SoundFilter | undefined;
-		let reverb: SoundReverb | undefined;
-		/** False until a user gesture creates/resumes the Web Audio graph (required on iOS). */
-		let soundReady = false;
 
 		let activeRenderer: Renderer | undefined;
-		/** Consumed by the next frame so renderers see each voicing change once. */
-		let pendingNoteEvent: NoteEvent | null = null;
-
-		let currentChordId: number | null = null;
-		let currentQuality: QualityName = 'major';
-		let currentTilt: 'inward' | 'outward' | 'neutral' = 'neutral';
-		let currentDegreeFacing: boolean | null = null;
-		let previousNotes: number[] | null = null;
 		let lastRootPc: PitchClass = options.getRootPc();
 		let lastMode: ScaleMode = options.getMode();
-
-		/** Joint degree + tilt + palm + quality; all inputs share one settle clock. */
-		let harmonyLastRaw = '0|neutral|cam|major';
-		let harmonyStable = 0;
-		let chordLastRaw = 0;
-		let degreeTiltLast: 'inward' | 'outward' | 'neutral' = 'neutral';
-		let degreeFacingLast: boolean | null = null;
-
-		/** Bass: double-tap left/right index knuckles (MCP).
-		 *  `bassMode` is the latched toggle; `bassInCurrentVoicing` is what the
-		 *  sounding chord actually includes (updates only on chord change). */
-		let bassMode = false;
-		let bassInCurrentVoicing = false;
-		let bassKnucklesTogether = false;
-		let bassTapTimes: number[] = [];
-		let bassToggleCooldownUntil = 0;
-
-		let voicingCommitY = 0;
-		let voicingArmed = false;
-		let voicingAnchorY = 0;
-		let voicingStable = 0;
-
 		let followerX = 0;
 		let followerY = 0;
-		let followerVelX = 0;
-		let followerVelY = 0;
-		let lastHandTargetX = 0;
-		let lastHandTargetY = 0;
+		let hostResizeObserver: ResizeObserver | undefined;
 
-		/** ml5 keypoints are in webcam capture pixels, not canvas pixels. */
+		const input = createInputRecognizer();
+		const session = createInstrumentSession({
+			input,
+			harmony: createHarmonyController(),
+			onHudUpdate: options.onHudUpdate
+		});
+
+		function sizeFromParent(): { w: number; h: number } {
+			const parent = p.canvas?.parentElement;
+			if (parent) {
+				const w = Math.floor(parent.clientWidth);
+				const h = Math.floor(parent.clientHeight);
+				if (w > 0 && h > 0) return { w, h };
+			}
+			return { w: p.windowWidth, h: p.windowHeight };
+		}
+
+		function fitCanvasToParent(): void {
+			const { w, h } = sizeFromParent();
+			if (w === p.width && h === p.height) return;
+			p.resizeCanvas(w, h);
+			activeRenderer?.resize?.(p);
+		}
+
 		function captureSize(): { w: number; h: number } {
 			if (video) {
 				const w = video.width as number;
@@ -226,6 +113,15 @@ export function createInstrumentCore(
 			}
 		}
 
+		function audioHost(): AudioHost {
+			return {
+				getContext: () => getNativeContext() ?? null,
+				unlock: async () => {
+					void (p as P5WithSound).userStartAudio?.();
+				}
+			};
+		}
+
 		function kickSilentBuffer(ctx: AudioContext): void {
 			try {
 				const buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
@@ -238,14 +134,9 @@ export function createInstrumentCore(
 			}
 		}
 
-		/** Must run inside a user gesture on iOS or oscillators stay silent. */
 		function unlockAudioFromGesture(): void {
-			const ps = p as P5WithSound;
-
-			// Create the p5.sound graph first so the shared AudioContext exists.
-			ensureSoundGraph();
-
-			void ps.userStartAudio?.();
+			syncMode();
+			session.unlockAudio(audioHost(), followerX, p.width);
 
 			const ctx = getNativeContext();
 			if (ctx) {
@@ -253,7 +144,6 @@ export function createInstrumentCore(
 				if (ctx.state !== 'running') {
 					void ctx.resume();
 				}
-				// Audible confirmation - native node, same gesture, same context.
 				try {
 					const osc = ctx.createOscillator();
 					const gain = ctx.createGain();
@@ -273,33 +163,16 @@ export function createInstrumentCore(
 				}
 			}
 
-			soundReady = true;
 			options.onAudioReadyChange?.(true);
-
-			if (currentChordId && currentChordId > 0 && previousNotes) {
-				playVoicing(previousNotes, followerX);
-			}
 		}
 
-		function ensureSoundGraph(): void {
-			if (filter) return;
-			const ctors = soundCtors(p.constructor as typeof p5);
-			filter = new ctors.Filter('lowpass');
-			filter.freq(FILTER_CUTOFF);
-			filter.res(FILTER_RES);
+		function syncMode(): void {
+			session.setPlayer(options.getPlayer(p));
 
-			reverb = new ctors.Reverb();
-			reverb.process(filter, REVERB_SECONDS, REVERB_DECAY);
-			reverb.drywet(REVERB_DRYWET);
-			reverb.amp(REVERB_AMP);
-		}
-
-		/** Swap in the selected renderer, letting the outgoing one tear down. */
-		function syncRenderer(): void {
-			const next = options.getRenderer();
-			if (next === activeRenderer) return;
+			const nextRenderer = options.getRenderer();
+			if (nextRenderer === activeRenderer) return;
 			activeRenderer?.destroy?.();
-			activeRenderer = next;
+			activeRenderer = nextRenderer;
 			activeRenderer.setup?.(p);
 		}
 
@@ -308,7 +181,15 @@ export function createInstrumentCore(
 		};
 
 		p.setup = () => {
+			// Parent exists once createCanvas attaches; size to host (not window) like GPU.
 			p.createCanvas(p.windowWidth, p.windowHeight);
+			fitCanvasToParent();
+
+			const parent = p.canvas?.parentElement;
+			if (parent && typeof ResizeObserver !== 'undefined') {
+				hostResizeObserver = new ResizeObserver(() => fitCanvasToParent());
+				hostResizeObserver.observe(parent);
+			}
 
 			try {
 				video = p.createCapture('video');
@@ -322,8 +203,6 @@ export function createInstrumentCore(
 				video = undefined;
 			}
 
-			// Do not create p5.sound nodes here - on iOS they must be born inside
-			// a user gesture or they stay silent even after resume.
 			try {
 				const ctx = getNativeContext();
 				if (ctx && ctx.state === 'running') {
@@ -333,21 +212,21 @@ export function createInstrumentCore(
 				/* ignore */
 			}
 
-			followerX = lastHandTargetX = p.width / 2;
-			followerY = lastHandTargetY = p.height / 2;
+			followerX = p.width / 2;
+			followerY = p.height / 2;
+			input.seedFollower?.(followerX, followerY);
 
-			syncRenderer();
+			syncMode();
 
 			options.onAudioControls?.({
 				unlock: unlockAudioFromGesture,
-				isReady: () => soundReady
+				isReady: () => session.getPlayer()?.isReady?.() ?? false
 			});
 			options.onAudioReadyChange?.(false);
 		};
 
 		p.windowResized = () => {
-			p.resizeCanvas(p.windowWidth, p.windowHeight);
-			activeRenderer?.resize?.(p);
+			fitCanvasToParent();
 		};
 
 		p.mousePressed = () => {
@@ -359,8 +238,16 @@ export function createInstrumentCore(
 			return false;
 		};
 
+		const p5WithRemove = p as p5 & {
+			registerMethod?: (name: string, fn: (this: p5) => void) => void;
+		};
+		p5WithRemove.registerMethod?.('remove', function () {
+			hostResizeObserver?.disconnect();
+			hostResizeObserver = undefined;
+		});
+
 		p.draw = () => {
-			syncRenderer();
+			syncMode();
 
 			p.background(10, 12, 13);
 
@@ -372,27 +259,83 @@ export function createInstrumentCore(
 				p.pop();
 			}
 
-			updateInputAndMusic();
+			const rootPc = options.getRootPc();
+			const mode = options.getMode();
+			const keyOrModeChanged = rootPc !== lastRootPc || mode !== lastMode;
+			if (keyOrModeChanged) {
+				lastRootPc = rootPc;
+				lastMode = mode;
+			}
 
-			activeRenderer?.draw(p, buildFrame());
+			const { w, h } = captureSize();
+			const inputUpdate = input.update(
+				hands,
+				rootPc,
+				mode,
+				p.width,
+				p.height,
+				w,
+				h,
+				p.millis(),
+				p.deltaTime
+			);
+			followerX = inputUpdate.intent.follower.x;
+			followerY = inputUpdate.intent.follower.y;
 
-			if (options.getShowHands()) drawHandKeypoints();
+			const step = session.step({
+				input: inputUpdate,
+				rootPc,
+				mode,
+				canvasWidth: p.width,
+				canvasHeight: p.height,
+				keyOrModeChanged,
+				deltaMs: p.deltaTime
+			});
+
+			if (step.pendingRelease) {
+				activeRenderer?.onRelease?.(p);
+			}
+			if (step.pendingVoicing) {
+				activeRenderer?.onVoicing?.(p, step.pendingVoicing, step.audioMix);
+			}
+
+			const frame = buildFrame(step.hud, step.audioMix, step.pendingVoicing);
+			activeRenderer?.draw(p, frame);
+			session.onSimFeedback(frame.audioMix);
+			session.tick(p.deltaTime);
+
+			// Strings draws its own octave cursor; keep the shared dot for other modes.
+			if (activeRenderer?.id !== 'strings') {
+				drawFollowerDot();
+			}
+			if (options.getShowHands()) {
+				const { w, h } = captureSize();
+				drawHandsOverlay(
+					p.drawingContext as CanvasRenderingContext2D,
+					hands,
+					p.width,
+					p.height,
+					w,
+					h,
+					p.millis(),
+					followerX,
+					followerY
+				);
+			}
 		};
 
-		function drawHandKeypoints(): void {
-			for (const hand of hands) {
-				p.noStroke();
-				p.fill(94, 230, 168);
-				for (const kp of hand.keypoints) {
-					p.circle(p.width - scaleCaptureX(kp.x), scaleCaptureY(kp.y), 6);
-				}
-			}
+		function drawFollowerDot(): void {
+			p.noStroke();
+			p.fill(94, 230, 168, 180);
+			p.circle(p.width - followerX, followerY, 18);
 		}
 
-		function buildFrame(): InstrumentFrame {
+		function buildFrame(
+			hud: InstrumentHudState,
+			audioMix: RendererAudioMix,
+			voicingChange: VoicingChange | null
+		): InstrumentFrame {
 			const { w, h } = captureSize();
-			const noteEvent = pendingNoteEvent;
-			pendingNoteEvent = null;
 			return {
 				width: p.width,
 				height: p.height,
@@ -405,703 +348,14 @@ export function createInstrumentCore(
 				captureHeight: h,
 				followerX,
 				followerY,
-				notes: previousNotes,
-				degree: currentChordId,
-				quality: currentChordId ? currentQuality : null,
-				bassActive: bassInCurrentVoicing,
-				noteEvent
+				notes: hud.notes,
+				degree: hud.degree,
+				quality: hud.quality,
+				bassActive: hud.bassActive,
+				voicingChange,
+				noteEvent: voicingChange ? noteEventFromVoicing(voicingChange) : null,
+				audioMix
 			};
-		}
-
-		function updateInputAndMusic(): void {
-			const { chordHand, modHand } = assignChordAndModHands(hands);
-
-			if (hands.length === 0) {
-				clearPlayingState();
-				return;
-			}
-
-			if (chordHand) {
-				lastHandTargetX = scaleCaptureX(chordHand.keypoints[9].x);
-				lastHandTargetY = scaleCaptureY(chordHand.keypoints[9].y);
-			}
-			updateFollower(lastHandTargetX, lastHandTargetY);
-
-			const rootPc = options.getRootPc();
-			const mode = options.getMode();
-			if (rootPc !== lastRootPc || mode !== lastMode) {
-				lastRootPc = rootPc;
-				lastMode = mode;
-				if (currentChordId && currentChordId > 0) {
-					startVoicing(currentChordId, currentQuality, {
-						onlyIfChanged: false
-					});
-				}
-			}
-
-			const rawChordId = chordHand ? classifyDegree(chordHand) : chordLastRaw;
-			if (chordHand) chordLastRaw = rawChordId;
-
-			const degreeTilt = chordHand ? getDegreeTilt(chordHand) : degreeTiltLast;
-			if (chordHand) degreeTiltLast = degreeTilt;
-
-			const rawDegreeFacing = chordHand
-				? palmFacesCamera(chordHand)
-				: degreeFacingLast;
-			if (chordHand && rawDegreeFacing !== null) {
-				degreeFacingLast = rawDegreeFacing;
-			}
-			const degreeFacing = rawDegreeFacing ?? degreeFacingLast;
-			const counterpart = degreeTilt === 'outward' || degreeFacing === false;
-
-			const triadQuality =
-				rawChordId > 0
-					? resolveDegreeTriad(rawChordId, mode, counterpart)
-					: 'major';
-			const modFacing = modHand ? palmFacesCamera(modHand) : null;
-			const bassTapping = updateBassGesture(hands);
-			const modQuality =
-				modHand && !bassTapping
-					? getModifierQuality(modHand, triadQuality)
-					: null;
-			const rawQuality: QualityName = modQuality ?? triadQuality;
-			const facingTag =
-				degreeFacing === false
-					? 'away'
-					: degreeFacing === true
-						? 'cam'
-						: 'edge';
-			const harmonyKey = `${rawChordId}|${degreeTilt}|${facingTag}|${rawQuality}`;
-
-			if (harmonyKey === harmonyLastRaw) harmonyStable++;
-			else {
-				harmonyStable = 0;
-				harmonyLastRaw = harmonyKey;
-			}
-
-			if (harmonyStable === SETTLE_FRAMES) {
-				const chordChanged = rawChordId !== currentChordId;
-				const qualityChanged = rawQuality !== currentQuality;
-				if (chordChanged || qualityChanged) {
-					if (rawChordId === 0) {
-						clearPlayingState();
-					} else {
-						startVoicing(rawChordId, rawQuality, {
-							onlyIfChanged: false
-						});
-						currentChordId = rawChordId;
-						currentQuality = rawQuality;
-					}
-				}
-				currentTilt = degreeTilt;
-				currentDegreeFacing = degreeFacing;
-			}
-
-			if (currentChordId && currentChordId > 0) {
-				if (!voicingArmed) {
-					if (p.abs(followerY - voicingCommitY) >= VOICING_COMMIT_DEADZONE) {
-						voicingArmed = true;
-						voicingAnchorY = followerY;
-						voicingStable = 0;
-					}
-				} else if (p.abs(followerY - voicingAnchorY) <= VOICING_SETTLE_Y) {
-					voicingStable++;
-					if (voicingStable >= VOICING_SETTLE_FRAMES) {
-						const desired = desiredVoicing(
-							currentChordId,
-							currentQuality,
-							bassInCurrentVoicing
-						);
-						if (!sameNoteSet(previousNotes, desired)) {
-							playVoicing(desired, followerX);
-							previousNotes = desired;
-							voicingCommitY = followerY;
-							voicingArmed = false;
-						}
-					}
-				} else {
-					voicingAnchorY = followerY;
-					voicingStable = 0;
-				}
-			}
-
-			reportHud({
-				keyLabel: formatKeyLabel(rootPc, mode),
-				degree: currentChordId,
-				tilt: degreeTilt,
-				degreeFacing:
-					degreeFacing === true
-						? 'cam'
-						: degreeFacing === false
-							? 'away'
-							: null,
-				quality: currentQuality,
-				qualitySource: modQuality ? 'mod' : currentChordId ? 'triad' : 'none',
-				modFacing:
-					modFacing === true ? 'cam' : modFacing === false ? 'away' : null,
-				bassMode,
-				bassActive: bassInCurrentVoicing,
-				notes: previousNotes,
-				followerX: p.width - followerX,
-				followerY: followerY,
-				handsDetected: hands.length
-			});
-		}
-
-		function clearPlayingState(): void {
-			if (currentChordId !== null || previousNotes !== null || voices.length > 0) {
-				stopChord();
-			}
-			previousNotes = null;
-			currentChordId = null;
-			currentQuality = 'major';
-			currentTilt = 'neutral';
-			currentDegreeFacing = null;
-			harmonyLastRaw = '0|neutral|cam|major';
-			harmonyStable = 0;
-			chordLastRaw = 0;
-			degreeFacingLast = null;
-			voicingCommitY = followerY;
-			voicingArmed = false;
-			voicingAnchorY = followerY;
-			voicingStable = 0;
-			// Keep bassMode sticky when hands drop; with nothing sounding the
-			// latch is already "in effect" for the next chord.
-			bassInCurrentVoicing = bassMode;
-			bassKnucklesTogether = false;
-			bassTapTimes = [];
-			bassToggleCooldownUntil = 0;
-			reportHud({
-				keyLabel: formatKeyLabel(options.getRootPc(), options.getMode()),
-				degree: null,
-				tilt: 'neutral',
-				degreeFacing: null,
-				quality: null,
-				qualitySource: 'none',
-				modFacing: null,
-				bassMode,
-				bassActive: bassInCurrentVoicing,
-				notes: null,
-				followerX: p.width - followerX,
-				followerY: followerY,
-				handsDetected: 0
-			});
-		}
-
-		function reportHud(state: InstrumentHudState): void {
-			options.onHudUpdate?.(state);
-		}
-
-		function handPalmDist(hand: Hand, x: number, y: number): number {
-			const kp = hand.keypoints[9];
-			return p.dist(scaleCaptureX(kp.x), scaleCaptureY(kp.y), x, y);
-		}
-
-		/**
-		 * Chord hand owns the follower dot. With two hands, stick to whichever
-		 * is nearest the last chord target so handedness flicker / array order
-		 * never yanks the dot onto the modifier hand.
-		 */
-		function assignChordAndModHands(detected: Hand[]): {
-			chordHand: Hand | null;
-			modHand: Hand | null;
-		} {
-			if (detected.length === 0) return { chordHand: null, modHand: null };
-			if (detected.length === 1) {
-				return { chordHand: detected[0], modHand: null };
-			}
-
-			const left = detected.find((h) => h.handedness === 'Left');
-			const nearest = detected.reduce((best, h) =>
-				handPalmDist(h, lastHandTargetX, lastHandTargetY) <
-				handPalmDist(best, lastHandTargetX, lastHandTargetY)
-					? h
-					: best
-			);
-
-			// Prefer Left only when nothing is near the tracked target yet
-			// (fresh two-hand appearance); otherwise stay sticky.
-			const stickyRadius = p.width * (160 / captureSize().w);
-			const nearTrack = detected.some(
-				(h) => handPalmDist(h, lastHandTargetX, lastHandTargetY) < stickyRadius
-			);
-			const chordHand = nearTrack ? nearest : left ?? nearest;
-			const modHand = detected.find((h) => h !== chordHand) ?? null;
-			return { chordHand, modHand };
-		}
-
-		function noteSetKey(notes: number[]): string {
-			return [...notes].sort((a, b) => a - b).join(',');
-		}
-
-		function sameNoteSet(a: number[] | null, b: number[]): boolean {
-			return a !== null && noteSetKey(a) === noteSetKey(b);
-		}
-
-		function pitchClassKey(notes: number[]): string {
-			return [...new Set(notes.map((n) => ((n % 12) + 12) % 12))]
-				.sort((a, b) => a - b)
-				.join(',');
-		}
-
-		function samePitchClasses(a: number[] | null, b: number[]): boolean {
-			return a !== null && pitchClassKey(a) === pitchClassKey(b);
-		}
-
-		function desiredVoicing(
-			chordId: number,
-			quality: QualityName,
-			withBass: boolean
-		): number[] {
-			const targetPCs = chordPitchClassesForQuality(chordId, quality);
-			const targetMidi = targetMidiFromHandY(followerY);
-			const notes = closestVoicingToDot(targetPCs, targetMidi);
-			return applyBassNote(notes, chordId, quality, withBass);
-		}
-
-		/** Root of the chord, one octave below the voiced root. */
-		function applyBassNote(
-			notes: number[],
-			chordId: number,
-			quality: QualityName,
-			withBass: boolean
-		): number[] {
-			if (!withBass || notes.length === 0) return notes;
-			const rootPc = chordPitchClassesForQuality(chordId, quality)[0];
-			const roots = notes.filter((n) => ((n % 12) + 12) % 12 === rootPc);
-			const chordRoot =
-				roots.length > 0 ? Math.min(...roots) : Math.min(...notes);
-			const bass = chordRoot - 12;
-			if (notes.some((n) => n === bass)) return notes;
-			return [bass, ...notes];
-		}
-
-		function setBassMode(next: boolean): void {
-			bassMode = next;
-			// Nothing sounding — apply the latch immediately so HUD/state match.
-			if (!currentChordId || currentChordId === 0 || previousNotes === null) {
-				bassInCurrentVoicing = next;
-			}
-			// Otherwise wait for the next chord / quality change.
-		}
-
-		/**
-		 * Bass toggle: quick double-tap of the two index-finger knuckles (MCP).
-		 * Returns whether knuckles are currently together (skip mod quality).
-		 */
-		function updateBassGesture(detected: Hand[]): boolean {
-			const now = p.millis();
-			const together = indexKnucklesTogether(detected);
-
-			if (now < bassToggleCooldownUntil) {
-				bassKnucklesTogether = together;
-				return together;
-			}
-
-			if (together && !bassKnucklesTogether) {
-				bassKnucklesTogether = true;
-			} else if (!together && bassKnucklesTogether) {
-				bassKnucklesTogether = false;
-				bassTapTimes = bassTapTimes.filter(
-					(t) => now - t <= BASS_DOUBLE_TAP_MS
-				);
-				bassTapTimes.push(now);
-				if (bassTapTimes.length >= 2) {
-					setBassMode(!bassMode);
-					bassTapTimes = [];
-					bassToggleCooldownUntil = now + BASS_TOGGLE_COOLDOWN_MS;
-				}
-			}
-			return together;
-		}
-
-		/** True when both hands' index MCPs (landmark 5) are close in capture space. */
-		function indexKnucklesTogether(detected: Hand[]): boolean {
-			if (detected.length < 2) return false;
-			const a = detected[0].keypoints[5];
-			const b = detected[1].keypoints[5];
-			const palmA = p.dist(
-				detected[0].keypoints[0].x,
-				detected[0].keypoints[0].y,
-				detected[0].keypoints[9].x,
-				detected[0].keypoints[9].y
-			);
-			const palmB = p.dist(
-				detected[1].keypoints[0].x,
-				detected[1].keypoints[0].y,
-				detected[1].keypoints[9].x,
-				detected[1].keypoints[9].y
-			);
-			const scale = (palmA + palmB) / 2;
-			if (scale < 1) return false;
-			return p.dist(a.x, a.y, b.x, b.y) < scale * BASS_KNUCKLE_TAP_RATIO;
-		}
-
-		function startVoicing(
-			chordId: number,
-			quality: QualityName,
-			opts: { onlyIfChanged?: boolean } = {}
-		): void {
-			// Chord / quality change: apply the latched bass toggle from here on.
-			bassInCurrentVoicing = bassMode;
-			const voicing = desiredVoicing(chordId, quality, bassInCurrentVoicing);
-			if (opts.onlyIfChanged && samePitchClasses(previousNotes, voicing)) {
-				return;
-			}
-			playVoicing(voicing, followerX);
-			previousNotes = voicing;
-			voicingCommitY = followerY;
-			voicingArmed = false;
-			voicingAnchorY = followerY;
-			voicingStable = 0;
-		}
-
-		function midiNumberToHz(m: number): number {
-			return 440 * p.pow(2, (m - 69) / 12);
-		}
-
-		function updateFollower(targetX: number, targetY: number): void {
-			const dx = targetX - followerX;
-			const dy = targetY - followerY;
-
-			const accX = dx * FOLLOWER_ACCEL;
-			const accY = dy * FOLLOWER_ACCEL;
-
-			followerVelX = (followerVelX + accX) * FOLLOWER_DAMPING;
-			followerVelY = (followerVelY + accY) * FOLLOWER_DAMPING;
-
-			const speed = Math.hypot(followerVelX, followerVelY);
-			if (speed > FOLLOWER_MAX_SPEED) {
-				const scale = FOLLOWER_MAX_SPEED / speed;
-				followerVelX *= scale;
-				followerVelY *= scale;
-			}
-
-			followerX += followerVelX;
-			followerY += followerVelY;
-		}
-
-		function playVoicing(notes: number[], handX: number): void {
-			stopChord();
-			if (!soundReady) return;
-			ensureSoundGraph();
-			if (!filter) return;
-
-			// Renderers pluck off this event, so it is raised exactly where the
-			// chord becomes audible - visuals stay in step with the sound.
-			pendingNoteEvent = { notes: [...notes], originX: p.width - handX };
-
-			const ctors = soundCtors(p.constructor as typeof p5);
-			filter.freq(FILTER_CUTOFF);
-
-			for (const note of notes) {
-				const hz = midiNumberToHz(note);
-				const bassish = note < VOICING_LOW_MIDI;
-				const attack = bassish ? ATTACK_AMP * 1.35 : ATTACK_AMP;
-				const sustain = bassish ? SUSTAIN_AMP * 1.4 : SUSTAIN_AMP;
-				const detune = bassish ? DETUNE_AMP * 0.7 : DETUNE_AMP;
-				voices.push(startTone(ctors, 'triangle', hz, attack, sustain));
-				voices.push(
-					startTone(
-						ctors,
-						'triangle',
-						hz * DETUNE_RATIO,
-						detune * 1.2,
-						detune
-					)
-				);
-			}
-		}
-
-		function startTone(
-			ctors: P5SoundConstructors,
-			type: string,
-			hz: number,
-			attackAmp: number,
-			sustainAmp: number
-		): SoundOscillator {
-			const osc = new ctors.Oscillator(type);
-			osc.disconnect();
-			osc.connect(filter as SoundFilter);
-			osc.freq(hz * ATTACK_PITCH_RATIO);
-			osc.amp(0);
-			osc.start();
-			osc.freq(hz, ATTACK_PITCH_TIME);
-			osc.amp(attackAmp, ATTACK_AMP_TIME);
-			osc.amp(sustainAmp, 0.1, ATTACK_AMP_TIME);
-			return osc;
-		}
-
-		function stopChord(): void {
-			for (const osc of voices) {
-				try {
-					osc.amp(0, RELEASE_TIME);
-					setTimeout(() => {
-						try {
-							osc.stop();
-						} catch {
-							/* already stopped */
-						}
-					}, RELEASE_STOP_MS);
-				} catch {
-					/* ignore teardown races */
-				}
-			}
-			voices = [];
-		}
-
-		function degreeMidi(degreeIndex: number): number {
-			return scaleDegreeMidi(
-				rootMidiFromPc(options.getRootPc()),
-				options.getMode(),
-				degreeIndex
-			);
-		}
-
-		function chordPitchClassesForQuality(
-			chordDigit: number,
-			qualityName: QualityName
-		): number[] {
-			const rootIdx = chordDigit - 1;
-
-			if (qualityName === 'natural') {
-				return [0, 2, 4].map(
-					(off) => ((degreeMidi(rootIdx + off) % 12) + 12) % 12
-				);
-			}
-
-			const chordRootPc = ((degreeMidi(rootIdx) % 12) + 12) % 12;
-			const intervals = qualityIntervals[qualityName];
-			return intervals.map((iv) => (chordRootPc + iv) % 12);
-		}
-
-		function targetMidiFromHandY(y: number): number {
-			return p.constrain(
-				p.map(
-					y,
-					p.height - VOICING_Y_MARGIN,
-					VOICING_Y_MARGIN,
-					VOICING_LOW_MIDI,
-					VOICING_HIGH_MIDI
-				),
-				VOICING_LOW_MIDI,
-				VOICING_HIGH_MIDI
-			);
-		}
-
-		function nearestNote(pitchClass: number, reference: number): number {
-			const candidate =
-				Math.round((reference - pitchClass) / 12) * 12 + pitchClass;
-			return [candidate - 12, candidate, candidate + 12].reduce((best, c) =>
-				Math.abs(c - reference) < Math.abs(best - reference) ? c : best
-			);
-		}
-
-		function closestVoicingToDot(
-			targetPitchClasses: number[],
-			targetMidi: number
-		): number[] {
-			return targetPitchClasses.map((pc) => nearestNote(pc, targetMidi));
-		}
-
-		/**
-		 * Inward vs outward lean of the degree hand (camera-facing).
-		 * Uses wrist→palm angle from vertical so it still works when fingers
-		 * are curled (middle tip lean was too weak). Hysteresis reduces flicker.
-		 */
-		function getDegreeTilt(hand: Hand): 'inward' | 'outward' | 'neutral' {
-			const kp = hand.keypoints;
-			const wrist = kp[0];
-			const middleMcp = kp[9];
-			const palmLen = p.dist(wrist.x, wrist.y, middleMcp.x, middleMcp.y);
-			if (palmLen < 1) return 'neutral';
-
-			// 0 = straight up in camera space (y grows downward).
-			const ax = middleMcp.x - wrist.x;
-			const ay = middleMcp.y - wrist.y;
-			const angleFromUp = Math.atan2(ax, -ay);
-
-			// Person facing camera: Right hand leans inward (toward chest) with
-			// negative camera-x; Left hand is the opposite.
-			const inwardDir = hand.handedness === 'Right' ? -1 : 1;
-			const score = angleFromUp * inwardDir;
-
-			const enter = 0.16; // ~9deg to enter inward/outward
-			const hold = 0.08; // hysteresis exit band
-
-			if (degreeTiltLast === 'outward') {
-				if (score < -hold) return 'outward';
-				if (score > enter) return 'inward';
-				return 'neutral';
-			}
-			if (degreeTiltLast === 'inward') {
-				if (score > hold) return 'inward';
-				if (score < -enter) return 'outward';
-				return 'neutral';
-			}
-			if (score > enter) return 'inward';
-			if (score < -enter) return 'outward';
-			return 'neutral';
-		}
-
-		/**
-		 * Natural diatonic triad for degree in current mode.
-		 * Counterpart (outward tilt or palm away) flips maj/min.
-		 * Diminished counterpart becomes major on the same root.
-		 */
-		function resolveDegreeTriad(
-			degree: number,
-			scaleMode: ScaleMode,
-			counterpart: boolean
-		): TriadQuality {
-			const natural = diatonicTriadQuality(degree, scaleMode) ?? 'major';
-			if (!counterpart) return natural;
-			if (natural === 'major') return 'minor';
-			if (natural === 'minor') return 'major';
-			return 'major';
-		}
-
-		/**
-		 * Camera-facing degree poses (fingers generally up). Returns 1-7, or 0
-		 * for fist / unrecognized (release). No degree 8.
-		 */
-		function classifyDegree(hand: Hand): number {
-			const kp = hand.keypoints;
-			const wrist = kp[0];
-			const scale = p.dist(wrist.x, wrist.y, kp[9].x, kp[9].y);
-			if (scale < 1) return 0;
-
-			const d = (a: HandKeypoint, b: HandKeypoint) =>
-				p.dist(a.x, a.y, b.x, b.y);
-			// Tip farther from wrist than PIP → finger extended "up".
-			const up = (tip: number, pip: number) =>
-				d(wrist, kp[tip]) > d(wrist, kp[pip]) * 1.08;
-			const thumbPinkyTouch = d(kp[4], kp[20]) < scale * 0.48;
-
-			const indexUp = up(8, 6);
-			const middleUp = up(12, 10);
-			const ringUp = up(16, 14);
-			const pinkyUp = up(20, 18);
-			const thumbOut = d(kp[4], kp[17]) > d(kp[2], kp[17]) * 1.08;
-			const fingerUps = [indexUp, middleUp, ringUp, pinkyUp];
-			const upCount = fingerUps.filter(Boolean).length;
-
-			// 7: thumb out, other fingers curled
-			if (thumbOut && upCount === 0) return 7;
-
-			// 1: index only
-			if (upCount === 1 && indexUp) return 1;
-
-			// 2: index + middle
-			if (upCount === 2 && indexUp && middleUp) return 2;
-
-			// 6: index + pinky (middle/ring down, thumb in)
-			if (
-				!thumbOut &&
-				indexUp &&
-				pinkyUp &&
-				!middleUp &&
-				!ringUp &&
-				upCount === 2
-			) {
-				return 6;
-			}
-
-			// 3: index/middle/ring up with thumb-pinky touch (former ASL 6)
-			if (
-				indexUp &&
-				middleUp &&
-				ringUp &&
-				!pinkyUp &&
-				thumbPinkyTouch &&
-				upCount === 3
-			) {
-				return 3;
-			}
-
-			// 4 / 5: four fingers; thumb in vs out
-			if (upCount === 4) return thumbOut ? 5 : 4;
-
-			// Former ASL-8-like (and anything else) → release
-			return 0;
-		}
-
-		/**
-		 * Whether the palm faces the camera (true), faces away (false), or is
-		 * edge-on / unclear (null). Uses wrist→index MCP × wrist→pinky MCP.
-		 */
-		function palmFacesCamera(hand: Hand): boolean | null {
-			const kp = hand.keypoints;
-			const wrist = kp[0];
-			const indexMcp = kp[5];
-			const pinkyMcp = kp[17];
-			const v1x = indexMcp.x - wrist.x;
-			const v1y = indexMcp.y - wrist.y;
-			const v2x = pinkyMcp.x - wrist.x;
-			const v2y = pinkyMcp.y - wrist.y;
-			const cross = v1x * v2y - v1y * v2x;
-			const scale = p.dist(wrist.x, wrist.y, kp[9].x, kp[9].y);
-			if (scale < 1 || Math.abs(cross) < scale * scale * 0.04) return null;
-			// Right hand palm-to-camera tends to produce a positive cross in
-			// image space; Left hand is mirrored.
-			return hand.handedness === 'Right' ? cross > 0 : cross < 0;
-		}
-
-		/**
-		 * Modifier-hand quality poses. Palm toward camera uses finger count
-		 * plus the current maj/min triad; palm away uses 1=aug, 2=dim.
-		 * Returns null when absent/unclear so degree+tilt stays in effect.
-		 */
-		function getModifierQuality(
-			modHand: Hand,
-			triad: TriadQuality
-		): Exclude<QualityName, 'natural'> | null {
-			const kp = modHand.keypoints;
-			const wrist = kp[0];
-			const scale = p.dist(wrist.x, wrist.y, kp[9].x, kp[9].y);
-			if (scale < 1) return null;
-
-			const facing = palmFacesCamera(modHand);
-			if (facing === null) return null;
-
-			const d = (a: HandKeypoint, b: HandKeypoint) =>
-				p.dist(a.x, a.y, b.x, b.y);
-			const up = (tip: number, pip: number) =>
-				d(wrist, kp[tip]) > d(wrist, kp[pip]) * 1.14;
-
-			const indexUp = up(8, 6);
-			const middleUp = up(12, 10);
-			const ringUp = up(16, 14);
-			const pinkyUp = up(20, 18);
-			const thumbOut = d(kp[4], kp[17]) > d(kp[2], kp[17]) * 1.2;
-
-			// Contiguous finger counts from the index.
-			let fingerCount = 0;
-			if (indexUp && !middleUp && !ringUp && !pinkyUp) fingerCount = 1;
-			else if (indexUp && middleUp && !ringUp && !pinkyUp) fingerCount = 2;
-			else if (indexUp && middleUp && ringUp && !pinkyUp) fingerCount = 3;
-			else if (indexUp && middleUp && ringUp && pinkyUp) fingerCount = 4;
-			else return null;
-
-			if (facing) {
-				// Palm toward camera — 7ths branch on maj vs min triad.
-				if (fingerCount === 1) {
-					return triad === 'major' ? 'major7' : 'minor7';
-				}
-				if (fingerCount === 2) {
-					if (triad === 'major') return 'dominant7';
-					// Minor (or dim) triad: thumb out = full dim7, else half-dim7.
-					return thumbOut ? 'diminished7' : 'halfDiminished7';
-				}
-				if (fingerCount === 3) return 'sus2';
-				if (fingerCount === 4) return 'sus4';
-				return null;
-			}
-
-			// Palm away from camera
-			if (fingerCount === 1) return 'augmented';
-			if (fingerCount === 2) return 'diminished';
-			return null;
 		}
 	};
 }
